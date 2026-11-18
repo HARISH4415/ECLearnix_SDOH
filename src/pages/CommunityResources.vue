@@ -1211,6 +1211,23 @@ async function showDirections(res) {
 
     if (!routeGeoJSON) {
       routeGeoJSON = generateCurvedRoutePath(oLng, oLat, dLng, dLat)
+    } else if (routeGeoJSON.coordinates && routeGeoJSON.coordinates.length > 0) {
+      // Connect endpoints directly to origin and destination markers
+      const coords = [...routeGeoJSON.coordinates]
+      const firstPt = coords[0]
+      const lastPt = coords[coords.length - 1]
+
+      // Seamlessly connect the starting point into the origin marker pin
+      if (Math.abs(firstPt[0] - oLng) > 0.00005 || Math.abs(firstPt[1] - oLat) > 0.00005) {
+        coords.unshift([oLng, oLat])
+      }
+
+      // Seamlessly connect the ending point into the destination marker pin
+      if (Math.abs(lastPt[0] - dLng) > 0.00005 || Math.abs(lastPt[1] - dLat) > 0.00005) {
+        coords.push([dLng, dLat])
+      }
+
+      routeGeoJSON.coordinates = coords
     }
 
     activeRouteInfo.value = {
@@ -1222,12 +1239,21 @@ async function showDirections(res) {
 
     drawRouteLayer(routeGeoJSON)
 
+    // Expand bounds to encompass the ENTIRE route geometry and both pins
     const bounds = new maplibregl.LngLatBounds()
-      .extend([oLng, oLat])
-      .extend([dLng, dLat])
+    bounds.extend([oLng, oLat])
+    bounds.extend([dLng, dLat])
+
+    if (routeGeoJSON && Array.isArray(routeGeoJSON.coordinates)) {
+      routeGeoJSON.coordinates.forEach(pt => {
+        if (Array.isArray(pt) && pt.length >= 2) {
+          bounds.extend([pt[0], pt[1]])
+        }
+      })
+    }
 
     mapInstance.fitBounds(bounds, {
-      padding: { top: 120, bottom: 100, left: 100, right: 100 },
+      padding: { top: 150, bottom: 90, left: 90, right: 90 },
       maxZoom: 15,
       speed: 1.2
     })
@@ -1243,6 +1269,15 @@ async function showDirections(res) {
       durationText: '~4 mins drive',
       res: res
     }
+    const bounds = new maplibregl.LngLatBounds()
+    bounds.extend([oLng, oLat])
+    bounds.extend([dLng, dLat])
+    fallbackGeoJSON.coordinates.forEach(pt => bounds.extend([pt[0], pt[1]]))
+    mapInstance.fitBounds(bounds, {
+      padding: { top: 150, bottom: 90, left: 90, right: 90 },
+      maxZoom: 15,
+      speed: 1.2
+    })
     triggerToast(`Route displayed to ${res.name}`)
   } finally {
     isRoutingLoading.value = false

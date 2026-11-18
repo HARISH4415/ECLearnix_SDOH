@@ -100,7 +100,7 @@ export const US_COUNTY_COORDINATES = {
   "Tunica County, Mississippi": { lat: 34.6843, lon: -90.3842, city: "Tunica", stateAbbr: "MS" },
 
   // North Carolina
-  "Camden County, North Carolina": { lat: 36.3387, lon: -76.1685, city: "Camden", stateAbbr: "NC" },
+  "Camden County, North Carolina": { lat: 36.3275, lon: -76.1720, city: "Camden", stateAbbr: "NC" },
   "Mecklenburg County, North Carolina": { lat: 35.2271, lon: -80.8431, city: "Charlotte", stateAbbr: "NC" },
   "Clay County, North Carolina": { lat: 35.0567, lon: -83.7543, city: "Hayesville", stateAbbr: "NC" },
   "Davidson County, North Carolina": { lat: 35.7942, lon: -80.2112, city: "Lexington", stateAbbr: "NC" },
