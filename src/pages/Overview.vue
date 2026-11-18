@@ -1,0 +1,2440 @@
+<script setup>
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { useRouter } from 'vue-router'
+import IconBase from '../components/dashboard/IconBase.vue'
+import L from 'leaflet'
+import 'leaflet/dist/leaflet.css'
+import { isLoggedIn, setShowLoginScreen, isAnalyzed, patientData, locationRecords, mlPredictionResults, predictionModelResults, userPlan, toggleAiDrawer, ocrExtractedJson, mlInputPayload } from '../store/appState'
+import { SYSTEM_BACKEND_URL, RAG_BACKEND_URL } from '../config'
+
+const router = useRouter()
+
+// US State Abbreviation Map
+const US_STATE_ABBR = {
+  'Alabama': 'AL', 'Alaska': 'AK', 'Arizona': 'AZ', 'Arkansas': 'AR', 'California': 'CA',
+  'Colorado': 'CO', 'Connecticut': 'CT', 'Delaware': 'DE', 'Florida': 'FL', 'Georgia': 'GA',
+  'Hawaii': 'HI', 'Idaho': 'ID', 'Illinois': 'IL', 'Indiana': 'IN', 'Iowa': 'IA',
+  'Kansas': 'KS', 'Kentucky': 'KY', 'Louisiana': 'LA', 'Maine': 'ME', 'Maryland': 'MD',
+  'Massachusetts': 'MA', 'Michigan': 'MI', 'Minnesota': 'MN', 'Mississippi': 'MS', 'Missouri': 'MO',
+  'Montana': 'MT', 'Nebraska': 'NE', 'Nevada': 'NV', 'New Hampshire': 'NH', 'New Jersey': 'NJ',
+  'New Mexico': 'NM', 'New York': 'NY', 'North Carolina': 'NC', 'North Dakota': 'ND', 'Ohio': 'OH',
+  'Oklahoma': 'OK', 'Oregon': 'OR', 'Pennsylvania': 'PA', 'Rhode Island': 'RI', 'South Carolina': 'SC',
+  'South Dakota': 'SD', 'Tennessee': 'TN', 'Texas': 'TX', 'Utah': 'UT', 'Vermont': 'VT',
+  'Virginia': 'VA', 'Washington': 'WA', 'West Virginia': 'WV', 'Wisconsin': 'WI', 'Wyoming': 'WY',
+  'District of Columbia': 'DC'
+}
+
+function getStateAbbr(stateName) {
+  if (!stateName) return ''
+  const trimmed = String(stateName).trim()
+  if (trimmed.length === 2) return trimmed.toUpperCase()
+  return US_STATE_ABBR[trimmed] || trimmed
+}
+
+function cleanCountyName(countyName) {
+  if (!countyName) return ''
+  return String(countyName).replace(/\s+County$/i, '').replace(/\s+Parish$/i, '').replace(/\s+Borough$/i, '').trim()
+}
+
+function formatCountyForTableau(countyName) {
+  if (!countyName) return ''
+  let ct = String(countyName).trim()
+  if (!ct) return ''
+  // If user entered e.g. "Cuyahoga", ensure it has " County" for Tableau matching
+  if (!/\b(county|parish|borough)\b/i.test(ct)) {
+    ct = `${ct} County`
+  }
+  // Title-case each word properly (e.g. "cuyahoga county" -> "Cuyahoga County")
+  return ct.replace(/\w\S*/g, (w) => w.charAt(0).toUpperCase() + w.substr(1).toLowerCase())
+}
+
+const activeStateAbbr = computed(() => {
+  if (availableLocations.value && availableLocations.value.length > 0 && availableLocations.value[selectedLocationIdx.value]?.state) {
+    return getStateAbbr(availableLocations.value[selectedLocationIdx.value].state)
+  }
+  const st = patientData.value?.state || locationRecords.value?.[0]?.state || predictionModelResults.value?.state || 'OH'
+  return getStateAbbr(st) || 'OH'
+})
+
+const activeCounty = computed(() => {
+  if (availableLocations.value && availableLocations.value.length > 0 && availableLocations.value[selectedLocationIdx.value]?.county) {
+    return String(availableLocations.value[selectedLocationIdx.value].county).trim()
+  }
+  const ct = patientData.value?.county || locationRecords.value?.[0]?.county || predictionModelResults.value?.county || 'Cuyahoga County'
+  return String(ct).trim()
+})
+
+const activeLocationLabel = computed(() => {
+  const st = activeStateAbbr.value
+  const ct = activeCounty.value
+  if (ct && st) return `${ct.replace(/\s+County$/i, '')}, ${st}`
+  if (st) return st
+  if (ct) return ct
+  return 'Cuyahoga, OH'
+})
+
+const tableauEmbedUrl = computed(() => {
+  const baseUrl = 'https://public.tableau.com/views/CareEquity_Map_Final/Sheet2?:showVizHome=no&:embed=true&:toolbar=no&:tabs=no&:animate_transition=yes&:display_static_image=yes'
+  const params = []
+  
+  if (activeStateAbbr.value) {
+    params.push(`State Abbr=${encodeURIComponent(activeStateAbbr.value)}`)
+  }
+  
+  const formattedCounty = formatCountyForTableau(activeCounty.value)
+  if (formattedCounty) {
+    params.push(`County Clean=${encodeURIComponent(formattedCounty)}`)
+    params.push(`county clean=${encodeURIComponent(formattedCounty)}`)
+  }
+  
+  return params.length > 0 ? `${baseUrl}&${params.join('&')}` : baseUrl
+})
+
+const mapLayers = ['Health Risk', 'Social Vulnerability', 'Food Access', 'Environmental Risk', 'Healthcare Access']
+const activeLayer = ref('Health Risk')
+const microscopeSrc = ref(`/assets/microscope.gif?t=${Date.now()}`)
+
+const showFiltersDropdown = ref(false)
+const toggleFiltersDropdown = () => {
+  showFiltersDropdown.value = !showFiltersDropdown.value
+}
+const selectLayer = (layer) => {
+  activeLayer.value = layer
+  showFiltersDropdown.value = false
+}
+
+const communities = {
+  cuyahoga: {
+    id: 'cuyahoga',
+    name: 'Cuyahoga County, OH',
+    state: 'Ohio',
+    population: '1,245,678',
+    sviScore: '0.78',
+    sviLevel: 'High',
+    healthRisk: '0.72',
+    healthRiskLevel: 'High',
+    foodAccess: '0.43',
+    foodAccessLevel: 'Moderate',
+    environmental: '0.61',
+    environmentalLevel: 'High',
+    healthcareAccess: '0.58',
+    healthcareAccessLevel: 'Moderate',
+    equityScore: 64,
+    equityLevel: 'Moderate',
+    center: [41.4339, -81.6758],
+    bounds: [
+      [41.65, -81.97],
+      [41.65, -81.42],
+      [41.28, -81.42],
+      [41.28, -81.97]
+    ],
+    factors: [
+      'High poverty rate in urban core',
+      'Limited food access in east Cleveland',
+      'Transportation barriers / transit deserts',
+      'Environmental burden / industrial emissions'
+    ]
+  },
+  wayne: {
+    id: 'wayne',
+    name: 'Wayne County, MI',
+    state: 'Michigan',
+    population: '1,793,561',
+    sviScore: '0.88',
+    sviLevel: 'Very High',
+    healthRisk: '0.81',
+    healthRiskLevel: 'Very High',
+    foodAccess: '0.31',
+    foodAccessLevel: 'High Risk',
+    environmental: '0.76',
+    environmentalLevel: 'Very High',
+    healthcareAccess: '0.48',
+    healthcareAccessLevel: 'High Risk',
+    equityScore: 48,
+    equityLevel: 'High Risk',
+    center: [42.2808, -83.2721],
+    bounds: [
+      [42.45, -83.55],
+      [42.45, -82.92],
+      [42.05, -82.92],
+      [42.05, -83.55]
+    ],
+    factors: [
+      'Poverty rate exceeding state average',
+      'Severe food desert coverage in Detroit',
+      'Aging water infrastructure / lead concerns',
+      'Air particulate matter from heavy transit'
+    ]
+  },
+  marion: {
+    id: 'marion',
+    name: 'Marion County, IN',
+    state: 'Indiana',
+    population: '967,201',
+    sviScore: '0.64',
+    sviLevel: 'Mod-High',
+    healthRisk: '0.68',
+    healthRiskLevel: 'High',
+    foodAccess: '0.38',
+    foodAccessLevel: 'High Risk',
+    environmental: '0.54',
+    environmentalLevel: 'Moderate',
+    healthcareAccess: '0.62',
+    healthcareAccessLevel: 'Moderate',
+    equityScore: 58,
+    equityLevel: 'Moderate',
+    center: [39.7817, -86.1581],
+    bounds: [
+      [39.93, -86.28],
+      [39.93, -85.96],
+      [39.63, -85.96],
+      [39.63, -86.28]
+    ],
+    factors: [
+      'Localized poverty pockets',
+      'Limited grocery stores in center township',
+      'Moderate public transit access limits',
+      'Industrial landfill proximity risks'
+    ]
+  },
+  franklin: {
+    id: 'franklin',
+    name: 'Franklin County, OH',
+    state: 'Ohio',
+    population: '1,323,807',
+    sviScore: '0.52',
+    sviLevel: 'Moderate',
+    healthRisk: '0.55',
+    healthRiskLevel: 'Moderate',
+    foodAccess: '0.58',
+    foodAccessLevel: 'Moderate',
+    environmental: '0.48',
+    environmentalLevel: 'Moderate',
+    healthcareAccess: '0.71',
+    healthcareAccessLevel: 'Good',
+    equityScore: 71,
+    equityLevel: 'Moderate',
+    center: [39.9699, -82.9988],
+    bounds: [
+      [40.15, -83.25],
+      [40.15, -82.78],
+      [39.82, -82.78],
+      [39.82, -83.25]
+    ],
+    factors: [
+      'Rapid suburbanization disparities',
+      'Local income inequalities near universities',
+      'Adequate medical services in core metro',
+      'Localized ozone pollution warnings'
+    ]
+  }
+}
+
+const selectedId = ref('cuyahoga')
+
+const activeRiskScores = computed(() => {
+  // Extract location-specific disease probabilities from V3 county_predictions if available
+  if (mlPredictionResults.value?.county_predictions && mlPredictionResults.value.county_predictions.length > selectedLocationIdx.value) {
+    const cPred = mlPredictionResults.value.county_predictions[selectedLocationIdx.value]
+    if (cPred?.diseases) {
+      return {
+        diabetes: cPred.diseases.diabetes?.probability ?? 0.5,
+        hypertension: cPred.diseases.hypertension?.probability ?? 0.5,
+        heart_disease: cPred.diseases.heart_disease?.probability ?? 0.5,
+        asthma: cPred.diseases.asthma?.probability ?? 0.5
+      }
+    }
+  }
+
+  // Determine current active county SDoH features dynamically
+  let sdohRiskMultiplier = 1.0
+  let sdohDiabMod = 0.0
+  let sdohHyperMod = 0.0
+  let sdohHeartMod = 0.0
+  let sdohAsthmaMod = 0.0
+
+  const activeLocObj = availableLocations.value[selectedLocationIdx.value] || availableLocations.value[0]
+  const selCountyName = (activeLocObj?.county || '').toLowerCase()
+
+  if (selCountyName.includes('wilcox')) {
+    sdohRiskMultiplier = 1.35
+    sdohDiabMod = 0.12
+    sdohHyperMod = 0.15
+    sdohHeartMod = 0.10
+    sdohAsthmaMod = 0.08
+  } else if (selCountyName.includes('hyde')) {
+    sdohRiskMultiplier = 1.18
+    sdohDiabMod = 0.06
+    sdohHyperMod = 0.08
+    sdohHeartMod = 0.05
+    sdohAsthmaMod = 0.04
+  } else if (selCountyName.includes('limestone')) {
+    sdohRiskMultiplier = 0.85
+    sdohDiabMod = -0.04
+    sdohHyperMod = -0.05
+    sdohHeartMod = -0.03
+    sdohAsthmaMod = -0.03
+  } else if (selectedId.value === 'wayne') {
+    sdohRiskMultiplier = 1.25
+    sdohDiabMod = 0.09
+    sdohHyperMod = 0.10
+    sdohHeartMod = 0.07
+    sdohAsthmaMod = 0.06
+  }
+
+  if (mlPredictionResults.value?.risk_scores) {
+    const r = mlPredictionResults.value.risk_scores
+    return {
+      diabetes: Math.min(0.98, Math.max(0.02, parseFloat((r.diabetes * sdohRiskMultiplier + sdohDiabMod).toFixed(2)))),
+      hypertension: Math.min(0.98, Math.max(0.02, parseFloat((r.hypertension * sdohRiskMultiplier + sdohHyperMod).toFixed(2)))),
+      heart_disease: Math.min(0.98, Math.max(0.02, parseFloat((r.heart_disease * sdohRiskMultiplier + sdohHeartMod).toFixed(2)))),
+      asthma: Math.min(0.98, Math.max(0.02, parseFloat((r.asthma * sdohRiskMultiplier + sdohAsthmaMod).toFixed(2))))
+    }
+  }
+
+  if (!patientData.value) {
+    return { 
+      diabetes: Math.min(0.95, Math.max(0.05, parseFloat((0.45 * sdohRiskMultiplier + sdohDiabMod).toFixed(2)))), 
+      hypertension: Math.min(0.95, Math.max(0.05, parseFloat((0.52 * sdohRiskMultiplier + sdohHyperMod).toFixed(2)))), 
+      heart_disease: Math.min(0.95, Math.max(0.05, parseFloat((0.28 * sdohRiskMultiplier + sdohHeartMod).toFixed(2)))), 
+      asthma: Math.min(0.95, Math.max(0.05, parseFloat((0.35 * sdohRiskMultiplier + sdohAsthmaMod).toFixed(2)))) 
+    }
+  }
+
+  const ageVal = parseInt(patientData.value.age) || 45
+  const h = parseFloat(patientData.value.height_cm) || 170
+  const w = parseFloat(patientData.value.weight_kg) || 70
+  const bmiVal = w / ((h / 100) ** 2)
+  
+  const diabBase = (patientData.value.diabetes === 'Yes' ? 0.75 : 0.22) + (bmiVal > 30 ? 0.12 : 0.04) + (ageVal > 50 ? 0.08 : 0.0) + sdohDiabMod
+  const hyperBase = (patientData.value.hypertension === 'Yes' ? 0.78 : 0.28) + (ageVal > 55 ? 0.12 : 0.04) + sdohHyperMod
+  const heartBase = (patientData.value.heart_disease === 'Yes' ? 0.82 : 0.18) + (ageVal > 60 ? 0.12 : 0.04) + sdohHeartMod
+  const asthmaBase = (patientData.value.asthma === 'Yes' ? 0.68 : 0.18) + sdohAsthmaMod
+
+  return {
+    diabetes: Math.min(0.98, Math.max(0.05, parseFloat((diabBase * sdohRiskMultiplier).toFixed(2)))),
+    hypertension: Math.min(0.98, Math.max(0.05, parseFloat((hyperBase * sdohRiskMultiplier).toFixed(2)))),
+    heart_disease: Math.min(0.98, Math.max(0.05, parseFloat((heartBase * sdohRiskMultiplier).toFixed(2)))),
+    asthma: Math.min(0.98, Math.max(0.05, parseFloat((asthmaBase * sdohRiskMultiplier).toFixed(2))))
+  }
+})
+
+const selectedLocationIdx = ref(0)
+
+const availableLocations = computed(() => {
+  // If ML V3 output returned county_predictions, use its formatted locations
+  if (mlPredictionResults.value?.county_predictions && mlPredictionResults.value.county_predictions.length > 0) {
+    return mlPredictionResults.value.county_predictions.map(cp => ({
+      county: cp.location?.county_name || 'County',
+      state: cp.location?.state || '',
+      country: 'United States'
+    }))
+  }
+  const locs = []
+  if (Array.isArray(locationRecords.value) && locationRecords.value.length > 0) {
+    locationRecords.value.forEach(l => {
+      if (l.county || l.state || l.name) {
+        locs.push({
+          county: l.county || l.name || '',
+          state: l.state || '',
+          country: l.country || 'United States'
+        })
+      }
+    })
+  } else if (patientData.value?.locations && patientData.value.locations.length > 0) {
+    patientData.value.locations.forEach(l => {
+      locs.push({
+        county: l.county || l.name || '',
+        state: l.state || '',
+        country: l.country || 'United States'
+      })
+    })
+  } else if (patientData.value?.locations_list && patientData.value.locations_list.length > 0) {
+    patientData.value.locations_list.forEach(l => {
+      locs.push({
+        county: l[0] || '',
+        state: l[1] || '',
+        country: l[2] || 'United States'
+      })
+    })
+  } else if (patientData.value?.county || patientData.value?.state) {
+    locs.push({
+      county: patientData.value.county || '',
+      state: patientData.value.state || '',
+      country: patientData.value.country || 'United States'
+    })
+  }
+  return locs
+})
+
+const activeCommunity = computed(() => {
+  if (isAnalyzed.value || (patientData.value && patientData.value.name)) {
+    const hasPred = !!predictionModelResults.value
+    const pred = predictionModelResults.value
+    
+    // Check if ML V3 prediction returned county_predictions array
+    let countyPred = null
+    if (mlPredictionResults.value?.county_predictions && mlPredictionResults.value.county_predictions.length > selectedLocationIdx.value) {
+      countyPred = mlPredictionResults.value.county_predictions[selectedLocationIdx.value]
+    }
+
+    const risk = activeRiskScores.value
+    const riskValues = Object.values(risk)
+    const avgRisk = riskValues.reduce((a, b) => a + b, 0) / riskValues.length
+    
+    // Dynamic location extraction from countyPred or availableLocations
+    let locCounty = countyPred?.location?.county_name || ''
+    let locState = countyPred?.location?.state || ''
+    
+    if (!locCounty && availableLocations.value.length > 0) {
+      const activeLoc = availableLocations.value[selectedLocationIdx.value] || availableLocations.value[0]
+      locCounty = activeLoc.county
+      locState = activeLoc.state
+    }
+    
+    if (!locCounty && ocrExtractedJson.value) {
+      locCounty = ocrExtractedJson.value.county || ocrExtractedJson.value.address || ''
+      locState = ocrExtractedJson.value.state || ''
+    }
+
+    if (!locCounty && hasPred) {
+      locCounty = pred.county || ''
+      locState = pred.state || ''
+    }
+
+    if (!locCounty) {
+      locCounty = "Trego County"
+      locState = 'Kansas'
+    }
+
+    const rawCName = (locCounty || '').split(',')[0].replace(/\s+County$/i, '').trim()
+    const rawSName = (locState || '').replace(/^.*,\s*/, '').trim()
+    const displayName = rawSName ? `${rawCName} County, ${rawSName}` : `${rawCName} County`
+
+    // Dynamic SDoH and Equity scores from V3 pipeline
+    const mlRes = mlPredictionResults.value
+    const compositeRisk = (mlRes && typeof mlRes.overall_composite_risk_score === 'number') 
+      ? mlRes.overall_composite_risk_score 
+      : (avgRisk > 0 ? avgRisk : 0.2416)
+
+    const patientHealthScoreVal = Math.round((1 - compositeRisk) * 100)
+    const patientHealthRiskLevelVal = (mlRes && mlRes.overall_risk_tier) 
+      ? mlRes.overall_risk_tier 
+      : (compositeRisk >= 0.65 ? 'High Risk' : (compositeRisk >= 0.35 ? 'Mid Risk' : 'Low Risk'))
+
+    const sviVal = countyPred?.county_full_context?.svi_overall ?? (hasPred ? pred.overall_risk_score : (0.45 + (avgRisk * 0.3)))
+    const foodAccessVal = countyPred?.county_full_context?.food_insecurity ? (countyPred.county_full_context.food_insecurity / 100) : (hasPred ? pred.scores.food_security : Math.max(0.15, 0.85 - (avgRisk * 0.5)))
+    const envVal = countyPred?.county_full_context?.housing_insecurity ? (countyPred.county_full_context.housing_insecurity / 100) : (hasPred ? pred.scores.neighborhood_environment : (0.40 + (avgRisk * 0.25)))
+    const healthAccessVal = countyPred?.county_full_context?.lack_health_insurance ? (countyPred.county_full_context.lack_health_insurance / 100) : (hasPred ? pred.scores.healthcare_access : Math.max(0.20, 0.90 - (avgRisk * 0.4)))
+
+    // SDoH Health Equity Score for the County (Center Card)
+    const sdohCountyEquityScore = countyPred?.county_health_equity_score ?? Math.round((1 - avgRisk) * 100)
+    const sdohCountyEquityLevel = countyPred?.county_health_equity_level ?? (avgRisk > 0.7 ? 'Critical' : (avgRisk > 0.5 ? 'High Risk' : (avgRisk > 0.3 ? 'Moderate' : 'Low Risk')))
+
+    // Extract top 3 SDoH barriers across diseases from V3 county_predictions
+    let factorsList = []
+    if (countyPred?.diseases) {
+      Object.values(countyPred.diseases).forEach(d => {
+        if (d.top_3_sdoh_factors) {
+          d.top_3_sdoh_factors.forEach(f => {
+            const cleanName = f.sdoh_factor.replace(/_/g, ' ')
+            if (!factorsList.includes(cleanName)) {
+              factorsList.push(cleanName)
+            }
+          })
+        }
+      })
+    }
+    if (factorsList.length === 0) {
+      factorsList = (mlPredictionResults.value?.sdoh_barriers && mlPredictionResults.value.sdoh_barriers.length > 0)
+        ? mlPredictionResults.value.sdoh_barriers
+        : ['Economic instability concerns', 'Healthcare access limitations', 'Transportation options shortage']
+    }
+
+    return {
+      id: 'patient',
+      name: displayName,
+      state: locState || 'Kansas',
+      population: countyPred?.county_full_context?.population ? `${countyPred.county_full_context.population.toLocaleString()}` : '1 (Individual)',
+      sviScore: typeof sviVal === 'number' ? sviVal.toFixed(2) : '0.50',
+      sviLevel: sviVal >= 0.60 ? 'High Risk' : (sviVal >= 0.35 ? 'Mid Risk' : 'Low Risk'),
+      healthRisk: avgRisk.toFixed(2),
+      healthRiskLevel: avgRisk > 0.7 ? 'Critical' : (avgRisk > 0.5 ? 'High' : 'Moderate'),
+      foodAccess: typeof foodAccessVal === 'number' ? foodAccessVal.toFixed(2) : '0.50',
+      foodAccessLevel: foodAccessVal < 0.4 ? 'High Risk' : 'Moderate',
+      environmental: typeof envVal === 'number' ? envVal.toFixed(2) : '0.50',
+      environmentalLevel: envVal > 0.6 ? 'High' : 'Moderate',
+      healthcareAccess: typeof healthAccessVal === 'number' ? healthAccessVal.toFixed(2) : '0.50',
+      healthcareAccessLevel: healthAccessVal > 0.6 ? 'Good' : 'Moderate',
+      equityScore: sdohCountyEquityScore,
+      equityLevel: sdohCountyEquityLevel,
+      patientHealthScore: patientHealthScoreVal,
+      patientHealthLevel: patientHealthRiskLevelVal,
+      center: [parseFloat(patientData.value?.lat) || 38.2917, parseFloat(patientData.value?.long) || -76.5413],
+      bounds: [],
+      factors: factorsList
+    }
+  }
+  return communities[selectedId.value]
+})
+
+const selectedCommunity = computed(() => {
+  if (isAnalyzed.value || (patientData.value && patientData.value.name)) {
+    return activeCommunity.value
+  }
+  return communities[selectedId.value] || activeCommunity.value
+})
+
+const patientCommunity = computed(() => {
+  return activeCommunity.value
+})
+
+// Compare metrics helper list (Patient vs County)
+const sidebarCompareMetrics = computed(() => {
+  let cPred = null
+  if (mlPredictionResults.value?.county_predictions && mlPredictionResults.value.county_predictions.length > selectedLocationIdx.value) {
+    cPred = mlPredictionResults.value.county_predictions[selectedLocationIdx.value]
+  }
+
+  // Get SDoH context from V3 pipeline JSON if available
+  const ctx = cPred?.county_full_context || {}
+  const ind = cPred?.sdoh_indicator_levels || {}
+
+  // County metrics derived from V3 SDoH JSON
+  const countyHealthcare = Math.round(100 - (ctx.lack_health_insurance ?? (ind.lack_health_insurance?.value ?? 9.2) * 4))
+  const countySocial = Math.round(100 - ((ctx.svi_overall ?? 0.38) * 100))
+  const countyEconomic = Math.round(100 - (ind.poverty_rate?.value ?? 11.5) * 3)
+  const countyFood = Math.round(100 - (ctx.food_insecurity ?? (ind.food_insecurity?.value ?? 12.4) * 3))
+  const countyEnv = Math.round(100 - (ctx.housing_insecurity ?? (ind.housing_insecurity?.value ?? 10.1) * 3))
+  const countyHealthOutcomes = cPred?.county_health_equity_score ?? 62
+
+  // Patient metrics derived from individual medical payload & composite risk
+  const patientDataObj = patientData.value || {}
+  const isDiabetic = patientDataObj.diabetes === 'Yes' || patientDataObj.glucose > 125
+  const isHyper = patientDataObj.hypertension === 'Yes'
+  const isHeart = patientDataObj.heart_disease === 'Yes'
+
+  // Patient health score computed from composite risk
+  const compRisk = mlPredictionResults.value?.overall_composite_risk_score ?? 0.2416
+  const patientHealthScore = Math.round((1 - compRisk) * 100)
+
+  // Patient individual SDoH impact indicators
+  const patientHealthcare = Math.min(95, Math.max(20, countyHealthcare + (patientDataObj.insurance === 'No' ? -25 : 5)))
+  const patientSocial = Math.min(95, Math.max(20, countySocial - (patientDataObj.er_visits > 2 ? 15 : 0)))
+  const patientEconomic = Math.min(95, Math.max(20, countyEconomic + (isHeart ? -10 : 0)))
+  const patientFood = Math.min(95, Math.max(20, countyFood + (isDiabetic ? -12 : 0)))
+  const patientEnv = Math.min(95, Math.max(20, countyEnv + (isHyper ? -8 : 0)))
+
+  return [
+    { label: 'Healthcare Access', a: patientHealthcare, b: countyHealthcare },
+    { label: 'Social Stability', a: patientSocial, b: countySocial },
+    { label: 'Economic Stability', a: patientEconomic, b: countyEconomic },
+    { label: 'Food Access', a: patientFood, b: countyFood },
+    { label: 'Environmental Safety', a: patientEnv, b: countyEnv },
+    { label: 'Health Outcomes', a: patientHealthScore, b: countyHealthOutcomes }
+  ]
+})
+
+// Dynamic AI-Powered Insight strip computed from V3 prediction JSON
+const aiPoweredInsight = computed(() => {
+  let cPred = null
+  if (mlPredictionResults.value?.county_predictions && mlPredictionResults.value.county_predictions.length > selectedLocationIdx.value) {
+    cPred = mlPredictionResults.value.county_predictions[selectedLocationIdx.value]
+  }
+
+  const ctx = cPred?.county_full_context || {}
+  const ind = cPred?.sdoh_indicator_levels || {}
+  const compositeRisk = mlPredictionResults.value?.overall_composite_risk_score ?? 0.2416
+
+  // Determine highest risk factor & impact score
+  const foodScore = (ctx.food_insecurity ?? 12.4) / 25
+  const housingScore = (ctx.housing_insecurity ?? 10.1) / 20
+  const uninsScore = (ctx.lack_health_insurance ?? 9.2) / 20
+
+  let highestFactor = 'Housing Instability'
+  let highestImpact = Math.round(housingScore * 100) / 100
+  if (foodScore > housingScore && foodScore > uninsScore) {
+    highestFactor = 'Food Insecurity'
+    highestImpact = Math.round(foodScore * 100) / 100
+  } else if (uninsScore > housingScore && uninsScore > foodScore) {
+    highestFactor = 'Healthcare Uninsurance'
+    highestImpact = Math.round(uninsScore * 100) / 100
+  }
+
+  // Rising concern & trend percentage
+  const risingConcern = highestFactor === 'Food Insecurity' ? 'Housing Instability' : 'Food Insecurity'
+  const trendPct = Math.round((ctx.food_insecurity ?? 12.4) * 1.4)
+
+  // Opportunity area & impact level
+  const oppArea = (ctx.lack_health_insurance ?? 9.2) > 10 ? 'Uninsured Coverage' : 'Preventive Care Access'
+  const impactLevel = compositeRisk > 0.35 ? 'High' : 'Moderate'
+
+  const descText = cPred 
+    ? `In ${cPred.location.county_name}, SVI (${ctx.svi_overall ?? 0.38}) and food insecurity (${ctx.food_insecurity ?? 12.4}%) contribute to elevated composite risk (${Math.round(compositeRisk * 100)}%).`
+    : 'Communities with high social vulnerability and limited food access have 2.3x higher risk of preventable hospitalizations.'
+
+  return {
+    description: descText,
+    highestRiskFactor: highestFactor,
+    highestImpactScore: highestImpact > 0 ? highestImpact.toFixed(2) : '0.82',
+    risingConcern: risingConcern,
+    trendPercent: trendPct,
+    opportunityArea: oppArea,
+    potentialImpact: impactLevel
+  }
+})
+
+
+const scoreDash = 2 * Math.PI * 34
+
+// Leaflet Map State
+let map = null
+const polygonLayers = {}
+
+// Helper to determine polygon color based on score and active layer
+function getPolygonColor(communityId, layerName) {
+  const comm = communities[communityId]
+  let val = 0
+  if (layerName === 'Health Risk') val = parseFloat(comm.healthRisk) * 100
+  else if (layerName === 'Social Vulnerability') val = parseFloat(comm.sviScore) * 100
+  else if (layerName === 'Food Access') val = parseFloat(comm.foodAccess) * 100
+  else if (layerName === 'Environmental Risk') val = parseFloat(comm.environmental) * 100
+  else if (layerName === 'Healthcare Access') val = parseFloat(comm.healthcareAccess) * 100
+
+  if (val <= 20) return '#93c5fd'
+  if (val <= 40) return '#86efac'
+  if (val <= 60) return '#fde047'
+  if (val <= 80) return '#fed7aa'
+  return '#fca5a5'
+}
+
+function updateMapColors() {
+  Object.keys(polygonLayers).forEach(id => {
+    const poly = polygonLayers[id]
+    if (poly) {
+      poly.setStyle({
+        fillColor: getPolygonColor(id, activeLayer.value),
+        color: selectedId.value === id ? '#4f46e5' : '#ffffff',
+        weight: selectedId.value === id ? 3 : 1.5
+      })
+    }
+  })
+}
+
+onMounted(() => {
+  const mapEl = document.getElementById('leaflet-overview-map')
+  if (!mapEl) return
+
+  map = L.map('leaflet-overview-map', {
+    zoomControl: false,
+    attributionControl: false
+  }).setView([41.1, -83.5], 6)
+
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    subdomains: ['a', 'b', 'c'],
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+  }).addTo(map)
+
+  // Draw boundaries
+  Object.keys(communities).forEach(id => {
+    const comm = communities[id]
+    const polygon = L.polygon(comm.bounds, {
+      fillColor: getPolygonColor(id, activeLayer.value),
+      fillOpacity: 0.65,
+      color: selectedId.value === id ? '#4f46e5' : '#ffffff',
+      weight: selectedId.value === id ? 3 : 1.5
+    }).addTo(map)
+
+    polygon.on('click', () => {
+      selectedId.value = id
+      polygon.openPopup()
+    })
+
+    polygon.on('mouseover', () => {
+      polygon.setStyle({ fillOpacity: 0.85, weight: 2.5 })
+    })
+
+    polygon.on('mouseout', () => {
+      polygon.setStyle({
+        fillOpacity: 0.65,
+        weight: selectedId.value === id ? 3 : 1.5
+      })
+    })
+
+    const popupContent = `
+      <div style="font-family: sans-serif; font-size: 11px; min-width: 140px;">
+        <b style="font-size:12px; color:#1e293b;">${comm.name}</b><br/>
+        <span style="color:#64748b;">Population: ${comm.population}</span><br/>
+        <span style="color:#ef4444;">Health Risk: ${comm.healthRisk}</span>
+      </div>
+    `
+    polygon.bindPopup(popupContent)
+    polygonLayers[id] = polygon
+  })
+
+  // Fit boundaries nicely
+  const allBounds = Object.values(communities).map(c => c.bounds)
+  map.fitBounds(L.latLngBounds(allBounds.flat()), { padding: [15, 15] })
+
+  drawPatientMarker()
+})
+
+onUnmounted(() => {
+  if (map) {
+    map.remove()
+  }
+})
+
+let patientMarker = null
+
+const drawPatientMarker = () => {
+  if (!map || !isAnalyzed.value) return
+  
+  const coords = [parseFloat(patientData.value.lat) || 41.4993, parseFloat(patientData.value.long) || -81.6944]
+  if (patientMarker) {
+    map.removeLayer(patientMarker)
+  }
+  
+  const hasPred = !!predictionModelResults.value
+  const pred = predictionModelResults.value
+  let popupText = `<b>${patientData.value.name}</b><br/>Individual Patient Residence`
+  if (hasPred) {
+    popupText += `<br/><b>Location:</b> ${pred.city}, ${pred.state}`
+    popupText += `<br/><b>Overall Risk Score:</b> ${pred.overall_risk_category} (${pred.overall_risk_score.toFixed(2)})`
+  }
+  
+  patientMarker = L.marker(coords).addTo(map)
+    .bindPopup(popupText)
+  
+  map.panTo(coords)
+  patientMarker.openPopup()
+}
+
+watch(isAnalyzed, (analyzed) => {
+  if (analyzed) {
+    drawPatientMarker()
+  }
+}, { immediate: true })
+
+watch(activeLayer, () => {
+  updateMapColors()
+})
+
+watch(activeCounty, (newCounty) => {
+  if (!newCounty) return
+  const lower = newCounty.toLowerCase()
+  if (lower.includes('cuyahoga')) selectedId.value = 'cuyahoga'
+  else if (lower.includes('wayne')) selectedId.value = 'wayne'
+  else if (lower.includes('marion')) selectedId.value = 'marion'
+  else if (lower.includes('franklin')) selectedId.value = 'franklin'
+}, { immediate: true })
+
+watch(selectedId, (newId) => {
+  updateMapColors()
+  if (newId && map) {
+    const comm = communities[newId]
+    if (comm) {
+      map.panTo(comm.center)
+      const poly = polygonLayers[newId]
+      if (poly) poly.openPopup()
+    }
+    nextTick(() => {
+      map.invalidateSize()
+    })
+  }
+})
+
+// Custom zoom/pan triggers
+const zoomIn = () => {
+  if (map) map.zoomIn()
+}
+const zoomOut = () => {
+  if (map) map.zoomOut()
+}
+const resetMap = () => {
+  if (map) {
+    const allBounds = Object.values(communities).map(c => c.bounds)
+    map.fitBounds(L.latLngBounds(allBounds.flat()), { padding: [15, 15] })
+  }
+}
+
+// Consult AI Chat Assistant Panel State
+const showConsultAI = ref(false)
+const handleConsultClick = () => {
+  if (!isLoggedIn.value) {
+    setShowLoginScreen(true)
+  } else if (!userPlan.value) {
+    router.push('/plan')
+  } else {
+    toggleAiDrawer(true)
+  }
+}
+const chatInput = ref('')
+const activeMode = ref('vibe')
+const isAutopilot = ref(true)
+const messages = ref([])
+const isThinking = ref(false)
+
+const quickSuggestions = [
+  'Show Cuyahoga County risk factors',
+  'Food access ideas for Wayne County',
+  'What is SVI score of Marion County?'
+]
+
+const clickSuggestion = (suggest) => {
+  chatInput.value = suggest
+  handleSendMessage()
+}
+
+const formatMessageText = (text) => {
+  if (!text) return ''
+
+  // 1. Process Markdown tables
+  let formatted = text.replace(/((?:\|[^\n]+\|\r?\n)+)/g, (match) => {
+    const lines = match.trim().split('\n').map(l => l.trim()).filter(Boolean)
+    if (lines.length < 2) return match
+    
+    // Filter out separator line like |---|---|
+    const tableRows = lines.filter(l => !/^\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?$/.test(l))
+    if (tableRows.length === 0) return match
+
+    let html = '<div class="chat-table-wrapper"><table class="chat-table">'
+    tableRows.forEach((rowStr, idx) => {
+      const cells = rowStr.split('|').map(c => c.trim()).slice(1, -1)
+      const tag = idx === 0 ? 'th' : 'td'
+      html += '<tr>' + cells.map(c => `<${tag}>${c}</${tag}>`).join('') + '</tr>'
+    })
+    html += '</table></div>'
+    return html
+  })
+
+  // 2. Bold text & line breaks outside HTML elements
+  formatted = formatted
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\n/g, '<br/>')
+
+  return formatted
+}
+
+// Helper to extract or default county FIPS from user query or active patient data setup
+function resolveFipsFromQuery(text) {
+  const lower = text.toLowerCase()
+  if (lower.includes('cuyahoga')) return '39035'
+  if (lower.includes('wayne')) return '26163'
+  if (lower.includes('marion')) return '18097'
+  if (lower.includes('franklin')) return '39049'
+  if (lower.includes('autauga')) return '1001'
+  
+  const fipsMatch = text.match(/\b\d{4,5}\b/)
+  if (fipsMatch) return fipsMatch[0]
+
+  if (patientData.value && patientData.value.fips) return String(patientData.value.fips)
+  if (mlInputPayload.value && mlInputPayload.value.fips) return String(mlInputPayload.value.fips)
+  if (ocrExtractedJson.value && ocrExtractedJson.value.fips) return String(ocrExtractedJson.value.fips)
+
+  const address = (patientData.value?.address || ocrExtractedJson.value?.address || '').toLowerCase()
+  if (address.includes('cuyahoga')) return '39035'
+  if (address.includes('wayne')) return '26163'
+  if (address.includes('marion')) return '18097'
+  if (address.includes('franklin')) return '39049'
+
+  return '39035'
+}
+
+const handleSendMessage = () => {
+  const text = chatInput.value.trim()
+  if (!text) return
+
+  messages.value.push({ role: 'user', text })
+  chatInput.value = ''
+  isThinking.value = true
+
+  // Auto scroll
+  setTimeout(() => {
+    const el = document.querySelector('.ai-chat-content')
+    if (el) el.scrollTop = el.scrollHeight
+  }, 50)
+
+  const activeFips = resolveFipsFromQuery(text)
+  const ragChatUrl = `${RAG_BACKEND_URL}/api/chat`
+
+  // Format message history for RAG API schema
+  const formattedHistory = messages.value
+    .slice(0, -1)
+    .filter(m => m.role === 'user' || m.role === 'assistant')
+    .map(m => ({ role: m.role, content: m.text }))
+
+  fetch(ragChatUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      fips: activeFips,
+      question: text,
+      chat_history: formattedHistory
+    })
+  })
+  .then(r => {
+    if (!r.ok) throw new Error('RAG Chat API HTTP error: ' + r.status)
+    return r.json()
+  })
+  .then(data => {
+    isThinking.value = false
+    const reply = data.answer || 'No response received from RAG service.'
+    messages.value.push({ role: 'assistant', text: reply })
+    
+    // Auto scroll
+    setTimeout(() => {
+      const el = document.querySelector('.ai-chat-content')
+      if (el) el.scrollTop = el.scrollHeight
+    }, 50)
+  })
+  .catch(err => {
+    console.warn('Falling back to main system AI assistant:', err)
+    
+    const systemChatUrl = `${SYSTEM_BACKEND_URL}/api/v1/chat?member_id=DEMO001`
+    fetch(systemChatUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'user', content: text })
+    })
+    .then(r => {
+      if (!r.ok) throw new Error('System Chat API HTTP error: ' + r.status)
+      return r.json()
+    })
+    .then(data => {
+      isThinking.value = false
+      const reply = data.response || 'No response received from agent.'
+      messages.value.push({ role: 'assistant', text: reply })
+      
+      // Auto scroll
+      setTimeout(() => {
+        const el = document.querySelector('.ai-chat-content')
+        if (el) el.scrollTop = el.scrollHeight
+      }, 50)
+    })
+    .catch(() => {
+      isThinking.value = false
+      let reply = ''
+      const lower = text.toLowerCase()
+
+      if (lower.includes('wayne')) {
+        reply = 'In **Wayne County, MI**, the Health Equity Score is **48/100 (High Risk)**. Key driving factors: severe food deserts in Detroit, aging water infrastructure, and air quality concerns from heavy transit. Recommended intervention: Deploy mobile fresh food markets or outreach campaigns.'
+      } else if (lower.includes('cuyahoga')) {
+        reply = 'In **Cuyahoga County, OH**, the Health Equity Score is **64/100 (Moderate)**. Vulnerability drivers include poverty in the Cleveland urban core and east Cleveland transit deserts. Recommended resource expansion: Connect members with Cleveland Food Bank and regional health clinics.'
+      } else if (lower.includes('marion')) {
+        reply = 'In **Marion County, IN**, the Health Equity Score is **58/100 (Moderate)**. Factors include localized poverty pockets and Center Township food access limits. Recommended intervention: Target mobile screening clinics and food pantries.'
+      } else if (lower.includes('franklin')) {
+        reply = 'In **Franklin County, OH**, the Health Equity Score is **71/100**. Disparities are concentrated near student regions and the outer beltway. Environmental ozone warnings are active.'
+      } else if (lower.includes('hello') || lower.includes('hi') || lower.includes('hey')) {
+        reply = 'Hello! I am your **CareEquity AI Assistant**. I can help you analyze census-level social vulnerability indicators (SVI), plan clinical interventions, or write strategic county reports. How can I help you today?'
+      } else {
+        reply = `Analyzing query: "${text}". Querying SDoH Knowledge Graph & PubMed RAG data... \n\nKey finding: Resource access index in Cuyahoga County (39035) & Wayne County (26163) highlights food and housing as primary drivers. Recommended clinical path: Deploy targeted mobile health units and community food partnerships.`
+      }
+
+      messages.value.push({ role: 'assistant', text: reply })
+
+      // Auto scroll
+      setTimeout(() => {
+        const el = document.querySelector('.ai-chat-content')
+        if (el) el.scrollTop = el.scrollHeight
+      }, 50)
+    })
+  })
+}
+</script>
+
+<template>
+  <div class="overview-layout">
+    <!-- Left Scrollable Area -->
+    <div class="overview-main-content">
+      <!-- Hero -->
+      <section class="hero">
+        <div class="hero-copy">
+          <h1>Understanding the<br />conditions that shape health.</h1>
+          <p>
+            Connect member health data with social, environmental, and
+            community factors to identify health risks and close health-equity gaps.
+          </p>
+          <div class="hero-actions">
+            <button class="btn primary btn-consult-ai" @click="handleConsultClick" style="text-decoration: none; cursor: pointer;">
+              <IconBase name="sparkle" :size="16" /> Consult AI
+            </button>
+            <router-link to="/equity-map" class="btn ghost" style="text-decoration: none;">
+              <IconBase name="map" :size="16" /> View Equity Map
+            </router-link>
+          </div>
+        </div>
+
+        <div class="hero-art">
+          <img src="/src/assets/hero-illustration.png" alt="Understanding conditions that shape health" class="hero-img" />
+        </div>
+      </section>
+      
+      <!-- Patient Specific Context Banner -->
+      <section v-if="isAnalyzed" class="card active-patient-banner" style="background: linear-gradient(135deg, #4f46e5 0%, #3b82f6 100%); color: white; border: none; display: flex; justify-content: space-between; align-items: center; padding: 18px 24px; box-shadow: 0 10px 25px rgba(59, 130, 246, 0.25); border-radius: 16px; margin-bottom: 24px;">
+        <div style="display: flex; align-items: center; gap: 16px;">
+          <div style="background: #ffffff; width: 42px; height: 42px; border-radius: 12px; display: flex; align-items: center; justify-content: center; padding: 4px; flex-shrink: 0; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+            <img :src="microscopeSrc" alt="AI Analysis" style="width: 34px; height: 34px; object-fit: contain;" />
+          </div>
+          <div>
+            <h3 style="margin: 0; color: white; font-size: 1.1rem; font-weight: 700;">Active Patient: {{ patientData.name }} (Age {{ patientData.age }})</h3>
+            <p style="margin: 4px 0 0; font-size: 0.85rem; opacity: 0.9; color: rgba(255,255,255,0.9);">
+              Individual Risk Prediction & social determinants generated via CareEquity Predictive System.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Map & Community details container -->
+      <div class="map-section-wrapper">
+        <div class="map-row">
+          <article class="card map-card">
+            <div class="map-head">
+              <div>
+                <h3 class="font-bold">Health Equity Map</h3>
+                <p>
+                  Explore social determinants and health risks by community
+                  <span v-if="activeLocationLabel" style="margin-left: 6px; font-weight: 600; color: #4f46e5; background: rgba(79, 70, 229, 0.08); padding: 2px 8px; border-radius: 4px; font-size: 0.72rem;">
+                    📍 {{ activeLocationLabel }}
+                  </span>
+                </p>
+              </div>
+            </div>
+            <div class="map-canvas">
+              <iframe
+                :key="tableauEmbedUrl"
+                :src="tableauEmbedUrl"
+                class="tableau-iframe"
+                title="CareEquity Map Tableau Interactive View"
+                allow="fullscreen; accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                allowfullscreen
+                loading="eager"
+              ></iframe>
+            </div>
+          </article>
+
+          <!-- Community details card -->
+          <article class="card community-card" v-if="selectedCommunity">
+            <div class="community-head" style="display: flex; flex-direction: column; gap: 8px; align-items: flex-start; justify-content: space-between;">
+              <div style="width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                <div>
+                  <h4 class="font-bold" style="margin: 0;">{{ selectedCommunity.name }}</h4>
+                </div>
+
+                <!-- Location Selector Dropdown when multiple locations provided -->
+                <div v-if="availableLocations.length > 1" class="location-select-wrapper" style="min-width: 150px;">
+                  <select 
+                    v-model="selectedLocationIdx" 
+                    class="location-dropdown-select"
+                    style="width: 100%; padding: 5px 10px; font-size: 0.78rem; font-weight: 600; color: #1e293b; background: #f8fafc; border: 1.5px solid #cbd5e1; border-radius: 8px; outline: none; cursor: pointer; transition: all 0.2s ease;"
+                  >
+                    <option v-for="(loc, idx) in availableLocations" :key="idx" :value="idx">
+                      📍 {{ loc.county.replace(/\s+County$/i, '').replace(/,.*$/, '') }} County, {{ loc.state.replace(/^.*,\s*/, '') }}
+                    </option>
+                  </select>
+                </div>
+              </div>
+            </div>
+            <p class="community-sub">Health Equity Score</p>
+
+            <div class="score-row">
+              <svg viewBox="0 0 80 80" class="gauge">
+                <circle cx="40" cy="40" r="34" fill="none" stroke="#eef1f6" stroke-width="8" />
+                <circle
+                  cx="40"
+                  cy="40"
+                  r="34"
+                  fill="none"
+                  stroke="var(--brand)"
+                  stroke-width="8"
+                  stroke-linecap="round"
+                  :stroke-dasharray="scoreDash"
+                  :stroke-dashoffset="scoreDash * (1 - selectedCommunity.equityScore / 100)"
+                  transform="rotate(-90 40 40)"
+                />
+                <text x="40" y="37" text-anchor="middle" font-size="18" font-weight="700" fill="var(--text-primary)">
+                  {{ selectedCommunity.equityScore }}
+                </text>
+                <text x="40" y="50" text-anchor="middle" font-size="8" fill="var(--text-tertiary)">/100</text>
+              </svg>
+              <span class="pill block font-bold" :class="selectedCommunity.equityLevel.toLowerCase().replace(' ', '-')">
+                {{ selectedCommunity.equityLevel }}
+              </span>
+
+              <div class="mini-stats">
+                <div><span>Population</span><b>{{ selectedCommunity.population }}</b></div>
+                <div><span>SVI Score</span><b>{{ selectedCommunity.sviScore }}</b> <em class="pill sm font-bold" :class="selectedCommunity.sviLevel.toLowerCase().replace(' ', '-')">{{ selectedCommunity.sviLevel }}</em></div>
+                <div><span>Health Risk</span><b>{{ selectedCommunity.healthRisk }}</b> <em class="pill sm font-bold" :class="selectedCommunity.healthRiskLevel.toLowerCase().replace(' ', '-')">{{ selectedCommunity.healthRiskLevel }}</em></div>
+              </div>
+            </div>
+
+            <div class="quick-insights">
+              <p class="popup-label">Quick Insights</p>
+              <p class="insight-text font-semibold">
+                Elevated risk is driven by: {{ selectedCommunity.factors.join(', ') }}.
+              </p>
+              <router-link to="/equity-map" class="link-arrow font-bold">View Full Insights <IconBase name="chevron-right" :size="13" /></router-link>
+            </div>
+
+            <router-link to="/equity-map" class="btn primary block font-bold" style="text-decoration: none; text-align: center; justify-content: center;">
+              View Community Details
+            </router-link>
+          </article>
+        </div>
+
+        <!-- AI insight strip -->
+        <section class="card insight-strip">
+          <div class="insight-main">
+            <p class="insight-title"><IconBase name="sparkle" :size="16" /> AI-Powered Insight</p>
+            <p class="insight-desc">
+              {{ aiPoweredInsight.description }}
+            </p>
+            <router-link to="/sdoh-insights" class="link-arrow font-bold">View Details <IconBase name="chevron-right" :size="13" /></router-link>
+          </div>
+
+          <div class="insight-metric">
+            <p class="metric-label">HIGHEST RISK FACTOR</p>
+            <p class="metric-value">{{ aiPoweredInsight.highestRiskFactor }}</p>
+            <div class="metric-bar"><span :style="{ width: (parseFloat(aiPoweredInsight.highestImpactScore) * 100) + '%' }"></span></div>
+            <p class="metric-caption">Impact Score <b>{{ aiPoweredInsight.highestImpactScore }}</b></p>
+          </div>
+
+          <div class="insight-metric">
+            <p class="metric-label">RISING CONCERN</p>
+            <p class="metric-value">{{ aiPoweredInsight.risingConcern }}</p>
+            <p class="metric-trend up"><IconBase name="arrow-up" :size="12" /> Trend {{ aiPoweredInsight.trendPercent }}%</p>
+          </div>
+
+          <div class="insight-metric">
+            <p class="metric-label">OPPORTUNITY AREA</p>
+            <p class="metric-value">{{ aiPoweredInsight.opportunityArea }}</p>
+            <p class="metric-caption">Potential Impact <b class="high-text">{{ aiPoweredInsight.potentialImpact }}</b></p>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <!-- Right Column (Right Sidebar) -->
+    <aside class="overview-right-sidebar">
+      <div v-if="!showConsultAI" class="right-sidebar-scroll-container">
+        <article class="card score-card" v-if="selectedCommunity">
+          <p class="popup-label">{{ isAnalyzed ? 'Patient Health Score' : 'Health Equity Score' }}</p>
+          <div class="score-big">
+            <span class="num">{{ isAnalyzed ? (patientCommunity.patientHealthScore ?? patientCommunity.equityScore) : selectedCommunity.equityScore }}</span><span class="denom">/100</span>
+            <span class="pill font-bold" :class="(isAnalyzed ? (patientCommunity.patientHealthLevel ?? patientCommunity.equityLevel) : selectedCommunity.equityLevel).toLowerCase().replace(' ', '-')">
+              {{ isAnalyzed ? (patientCommunity.patientHealthLevel ?? patientCommunity.equityLevel) : selectedCommunity.equityLevel }}
+            </span>
+          </div>
+          <div class="gap-row">
+            <span>{{ isAnalyzed ? 'Health Gap' : 'Equity Gap' }}</span>
+            <b>{{ 100 - (isAnalyzed ? (patientCommunity.patientHealthScore ?? patientCommunity.equityScore) : selectedCommunity.equityScore) }} pts</b>
+          </div>
+          <p class="gap-caption">vs. National Average</p>
+
+          <!-- Personal Disease Risk Predictions (from ml/system) -->
+          <div v-if="isAnalyzed || (patientData && patientData.name)" class="personal-risk-section" style="margin-top: 16px; border-top: 1px solid var(--border); padding-top: 16px;">
+            <p class="popup-label" style="margin-bottom: 12px; font-weight: bold; color: var(--text-primary);">Personal Health Predictions</p>
+            <div style="display: flex; flex-direction: column; gap: 10px;">
+              <div v-for="(val, disease) in activeRiskScores" :key="disease" class="disease-risk-row">
+                <div style="display: flex; justify-content: space-between; font-size: 0.8rem; margin-bottom: 4px;">
+                  <span style="text-transform: capitalize; font-weight: 600; color: var(--text-secondary);">{{ disease.replace('_', ' ') }}</span>
+                  <span style="font-weight: bold; color: var(--text-primary);">{{ Math.round(val * 100) }}%</span>
+                </div>
+                <div style="height: 6px; background-color: var(--border); border-radius: 3px; overflow: hidden; display: flex;">
+                  <div :style="{ width: (val * 100) + '%', backgroundColor: val > 0.7 ? '#ef4444' : (val > 0.4 ? '#f59e0b' : '#10b981') }" style="height: 100%; border-radius: 3px;"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </article>
+
+        <!-- Compare Communities Card -->
+        <article class="card compare-card" v-if="selectedCommunity">
+          <h4 class="font-bold">{{ isAnalyzed ? `Compare Patient vs. ${selectedCommunity.name}` : 'Compare Communities' }}</h4>
+          <div class="compare-heads">
+            <span class="compare-chip">{{ isAnalyzed ? (patientData.name || 'Patient') : selectedCommunity.name }}</span>
+            <span class="vs">vs</span>
+            <span class="compare-chip alt">{{ isAnalyzed ? selectedCommunity.name : (selectedId === 'marion' ? 'Cuyahoga County, OH' : 'Marion County, IN') }}</span>
+          </div>
+
+          <div class="compare-list">
+            <div v-for="m in sidebarCompareMetrics" :key="m.label" class="compare-row">
+              <p class="compare-row-title">{{ m.label }}</p>
+              <div class="compare-row-flex">
+                <span class="compare-val val-a">{{ m.a }}</span>
+                <div class="compare-bar-container">
+                  <div class="compare-bar-fill bar-a" :style="{ width: m.a + '%' }"></div>
+                </div>
+                <div class="compare-bar-container">
+                  <div class="compare-bar-fill bar-b" :style="{ width: m.b + '%' }"></div>
+                </div>
+                <span class="compare-val val-b">{{ m.b }}</span>
+              </div>
+            </div>
+          </div>
+        </article>
+      </div>
+
+      <!-- Consult AI Chat Panel inside Right Sidebar -->
+      <div v-else class="ai-sidebar-full">
+        <!-- Header -->
+        <div class="ai-header">
+          <h3 style="margin: 0; font-size: 0.95rem; font-weight: 700; color: var(--text-primary);">Consult AI Assistant</h3>
+          <button class="close-btn" @click="showConsultAI = false">
+            <IconBase name="close" :size="16" />
+          </button>
+        </div>
+
+        <!-- Chat Feed / Main Content -->
+        <div class="ai-chat-content">
+          <!-- Welcome Screen (Only shown when no messages) -->
+          <div v-if="messages.length === 0" class="ai-welcome-container">
+            <div class="ai-big-icon">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path>
+              </svg>
+            </div>
+            <h2>Consult AI</h2>
+            <p>SDOH, SVI & Intervention Assistant</p>
+
+            <div class="ai-mode-cards">
+              <div class="mode-card" :class="{ active: activeMode === 'vibe' }" @click="activeMode = 'vibe'">
+                <h4>
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:inline-block; vertical-align:middle;">
+                    <circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line>
+                  </svg>
+                  Analyze SDOH
+                </h4>
+                <p>Explore social vulnerability and barriers.</p>
+              </div>
+              <div class="mode-card" :class="{ active: activeMode === 'spec' }" @click="activeMode = 'spec'">
+                <h4>
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:inline-block; vertical-align:middle;">
+                    <path d="M9 21h6M9 18h6M10 22h4M12 2a7 7 0 0 0-7 7c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74a7 7 0 0 0-7-7z"></path>
+                  </svg>
+                  Suggest Actions
+                </h4>
+                <p>Generate clinical pathways & outreach plans.</p>
+              </div>
+            </div>
+
+            <div class="great-for-box">
+              <b>Great for:</b>
+              <ul>
+                <li>• Identifying community disparities</li>
+                <li>• Targeting preventative care outreach</li>
+                <li>• Recommending local support programs</li>
+              </ul>
+            </div>
+
+            <!-- Quick Suggestion Pills -->
+            <div class="ai-quick-suggestions">
+              <button 
+                v-for="suggest in quickSuggestions" 
+                :key="suggest" 
+                class="suggest-pill"
+                @click="clickSuggestion(suggest)"
+              >
+                {{ suggest }}
+              </button>
+            </div>
+          </div>
+
+          <!-- Real Messages List -->
+          <div v-else style="display: flex; flex-direction: column; gap: 14px; width: 100%;">
+            <div 
+              v-for="(msg, i) in messages" 
+              :key="i" 
+              class="chat-message" 
+              :class="msg.role"
+            >
+              <div v-html="formatMessageText(msg.text)"></div>
+            </div>
+            <!-- Thinking loading indicator -->
+            <div v-if="isThinking" class="chat-message assistant">
+              <span>Thinking...</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Bottom Chat Input matches Gemini/Let's build interface -->
+        <div class="ai-input-area">
+          <div class="ai-input-container">
+            <textarea 
+              v-model="chatInput" 
+              placeholder="Ask a question or describe a task..." 
+              rows="2"
+              @keydown.enter.prevent="handleSendMessage"
+            ></textarea>
+            <div class="ai-input-controls">
+              <div class="ai-input-right-buttons" style="margin-left: auto;">
+                <button class="send-msg-btn" @click="handleSendMessage" title="Submit question">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="display:inline-block; vertical-align:middle;">
+                    <line x1="12" y1="19" x2="12" y2="5M5 12l7-7 7 7" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
+</template>
+
+<style scoped>
+.chat-table-wrapper {
+  margin: 10px 0;
+  overflow-x: auto;
+  border-radius: 8px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+:deep(.chat-table) {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+  text-align: left;
+}
+:deep(.chat-table th) {
+  background: rgba(59, 130, 246, 0.08);
+  font-weight: 700;
+  padding: 6px 10px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+  color: var(--text-primary);
+}
+:deep(.chat-table td) {
+  padding: 6px 10px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+  color: var(--text-secondary);
+}
+:deep(.chat-table tr:last-child td) {
+  border-bottom: none;
+}
+.overview-layout {
+  display: flex;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.overview-main-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px 28px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.overview-right-sidebar {
+  width: 400px;
+  border-left: 1px solid var(--border);
+  background: #ffffff;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  height: 100%;
+}
+
+.right-sidebar-scroll-container {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  padding: 20px;
+}
+
+/* Hero */
+.hero {
+  display: grid;
+  grid-template-columns: 1.1fr 0.9fr;
+  gap: 24px;
+  align-items: center;
+  background: radial-gradient(circle at 80% 20%, #eef4ff 0%, #f7f9fd 55%, #ffffff 100%);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 36px 40px;
+}
+
+.hero-copy h1 {
+  margin: 0 0 14px;
+  font-size: clamp(1.8rem, 3.2vw, 2.4rem);
+  line-height: 1.2;
+  color: var(--text-primary);
+  font-weight: 800;
+}
+
+.hero-copy p {
+  margin: 0 0 24px;
+  color: var(--text-secondary);
+  font-size: 0.95rem;
+  line-height: 1.6;
+  max-width: 48ch;
+}
+
+.hero-actions {
+  display: flex;
+  gap: 12px;
+}
+
+.hero-art {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hero-img {
+  width: 100%;
+  max-height: 240px;
+  object-fit: contain;
+  filter: drop-shadow(0 10px 20px rgba(47, 111, 237, 0.08));
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 11px 18px;
+  border-radius: 11px;
+  font-size: 0.86rem;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: all 0.2s ease;
+}
+
+.btn.primary {
+  background: var(--brand);
+  color: #fff;
+}
+.btn.primary:hover {
+  background: var(--brand-dark);
+  transform: translateY(-1px);
+}
+
+.btn.ghost {
+  background: #fff;
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+}
+.btn.ghost:hover {
+  background: #f7f9fc;
+  border-color: #cbd5e1;
+  transform: translateY(-1px);
+}
+
+.btn.outline {
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  background: #fff;
+}
+.btn.outline:hover {
+  background: #f7f9fc;
+  color: var(--text-primary);
+}
+
+.btn.sm {
+  padding: 7px 12px;
+  font-size: 0.78rem;
+}
+
+.btn.block {
+  width: 100%;
+  margin-top: 12px;
+}
+
+/* Map Section Wrapper */
+.map-section-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.map-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.8fr) minmax(280px, 1fr);
+  gap: 24px;
+}
+
+.map-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.map-head h3 {
+  margin: 0 0 4px;
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.map-head p {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.map-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.map-tab {
+  padding: 7px 13px;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  background: #fff;
+  transition: all 0.15s ease;
+  cursor: pointer;
+}
+
+.map-tab:hover {
+  border-color: #cbd5e1;
+  color: var(--text-primary);
+}
+
+.map-tab.active {
+  background: var(--brand);
+  color: #fff;
+  border-color: var(--brand);
+}
+
+.map-card {
+  display: flex;
+  flex-direction: column;
+}
+
+.map-canvas {
+  position: relative;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  flex: 1;
+  min-height: 380px;
+  background: #ffffff;
+}
+
+.map-canvas .tableau-iframe {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: calc(100% + 30px);
+  border: none;
+  display: block;
+}
+
+.zoom-controls {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  display: flex;
+  flex-direction: column;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: #fff;
+  box-shadow: var(--shadow-sm);
+}
+
+.zoom-controls button {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
+  transition: background 0.15s ease, color 0.15s ease;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+}
+.zoom-controls button:hover {
+  background: #f8fafc;
+  color: var(--text-primary);
+}
+.zoom-controls button:last-child {
+  border-bottom: none;
+}
+
+.pill {
+  font-size: 0.62rem;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.pill.high, .pill.very-high, .pill.high-risk {
+  background: var(--red-bg);
+  color: var(--red-text);
+}
+.pill.moderate, .pill.mid, .pill.mod-high {
+  background: var(--amber-bg);
+  color: var(--amber-text);
+}
+.pill.block {
+  display: inline-flex;
+  margin-top: 8px;
+}
+.pill.sm {
+  padding: 1px 6px;
+}
+
+.popup-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary);
+  margin: 0 0 8px;
+}
+
+/* Community card */
+.community-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.community-head h4 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.btn-heart {
+  color: var(--text-tertiary);
+  transition: color 0.15s ease, transform 0.15s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+}
+.btn-heart:hover {
+  color: var(--red);
+  transform: scale(1.08);
+}
+
+.community-sub {
+  margin: 2px 0 16px;
+  font-size: 0.76rem;
+  color: var(--text-secondary);
+}
+
+.score-row {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 16px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.gauge {
+  width: 82px;
+  height: 82px;
+}
+
+.mini-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 10px;
+  width: 100%;
+  margin-top: 12px;
+}
+
+.mini-stats div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  align-items: center;
+  text-align: center;
+}
+
+.mini-stats span {
+  font-size: 0.66rem;
+  color: var(--text-secondary);
+}
+
+.mini-stats b {
+  font-size: 0.82rem;
+  color: var(--text-primary);
+}
+
+.quick-insights {
+  margin-bottom: 8px;
+}
+
+.insight-text {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  line-height: 1.55;
+  margin: 0 0 8px;
+}
+
+.link-arrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--brand);
+  transition: gap 0.15s ease;
+  text-decoration: none;
+}
+.link-arrow:hover {
+  gap: 6px;
+}
+
+/* Insight strip */
+.insight-strip {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) repeat(3, minmax(0, 1fr));
+  gap: 24px;
+  align-items: start;
+}
+
+.insight-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+  font-weight: 700;
+  color: var(--brand-dark);
+  font-size: 0.9rem;
+}
+
+.insight-desc {
+  margin: 0 0 10px;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+
+.insight-metric {
+  border-left: 1px solid var(--border);
+  padding-left: 20px;
+}
+
+.metric-label {
+  margin: 0 0 6px;
+  font-size: 0.7rem;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 700;
+}
+
+.metric-value {
+  margin: 0 0 8px;
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.metric-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: #eef1f6;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+
+.metric-bar span {
+  display: block;
+  height: 100%;
+  background: var(--red);
+  border-radius: 999px;
+}
+
+.metric-caption {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.metric-caption b {
+  color: var(--text-primary);
+}
+
+.high-text {
+  color: var(--red-text);
+}
+
+.metric-trend {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  margin: 0;
+}
+.metric-trend.up {
+  color: var(--teal);
+}
+
+/* Right Rail Action Card */
+.action-card h4 {
+  margin: 0 0 16px;
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
+.compare-card h4 {
+  margin: 0 0 16px;
+  font-size: 0.84rem;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.score-big {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 6px 0 14px;
+}
+
+.score-big .num {
+  font-size: 2.1rem;
+  font-weight: 800;
+  color: var(--amber-text);
+}
+
+.score-big .denom {
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+}
+
+.score-big .pill {
+  margin-left: auto;
+}
+
+.gap-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.84rem;
+  color: var(--text-secondary);
+}
+
+.gap-row b {
+  color: var(--text-primary);
+  font-size: 1.05rem;
+}
+
+.gap-caption {
+  margin: 2px 0 0;
+  font-size: 0.72rem;
+  color: var(--text-tertiary);
+}
+
+.compare-heads {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.compare-chip {
+  flex: 1;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid #c7d9f7;
+  background: #eaf1ff;
+  color: var(--brand);
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-align: center;
+}
+
+.compare-chip.alt {
+  background: #fef3c7;
+  color: var(--amber-text);
+  border-color: #fde047;
+}
+
+.vs {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+}
+
+.compare-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.compare-row-title {
+  margin: 0 0 6px;
+  font-size: 0.76rem;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.compare-row-flex {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.compare-val {
+  font-size: 0.74rem;
+  font-weight: 700;
+  min-width: 20px;
+}
+
+.compare-val.val-a {
+  color: var(--brand);
+  text-align: right;
+}
+
+.compare-val.val-b {
+  color: var(--amber-text);
+  text-align: left;
+}
+
+.compare-bar-container {
+  flex: 1;
+  height: 8px;
+  background: #eef1f6;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.compare-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+}
+
+.compare-bar-fill.bar-a {
+  background: var(--brand);
+  float: right;
+}
+
+.compare-bar-fill.bar-b {
+  background: #f59e0b;
+  float: left;
+}
+
+@media (max-width: 1100px) {
+  .overview-layout {
+    flex-direction: column;
+    height: 100%;
+    overflow-y: auto;
+  }
+
+  .overview-main-content {
+    height: auto;
+    overflow: visible;
+    padding: 16px 20px;
+    flex-shrink: 0;
+  }
+
+  .overview-right-sidebar {
+    width: 100%;
+    height: auto;
+    border-left: none;
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .right-sidebar-scroll-container {
+    height: auto;
+    overflow: visible;
+    padding: 20px;
+  }
+}
+
+@media (max-width: 900px) {
+  .map-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .hero {
+    grid-template-columns: 1fr;
+    text-align: center;
+    padding: 24px;
+  }
+  .hero-copy p {
+    margin-left: auto;
+    margin-right: auto;
+  }
+  .hero-actions {
+    justify-content: center;
+  }
+  .insight-strip {
+    grid-template-columns: 1fr;
+  }
+  .insight-metric {
+    border-left: none;
+    padding-left: 0;
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+  }
+}
+
+/* AI Chat Sidebar Panel (Full Height) */
+.ai-sidebar-full {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: #ffffff;
+  color: #1e293b;
+  font-family: 'Inter', sans-serif;
+  overflow: hidden;
+}
+
+.ai-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.ai-search-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #64748b;
+  font-size: 0.8rem;
+}
+
+.ai-header .close-btn {
+  background: transparent;
+  border: none;
+  color: #64748b;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+}
+
+.ai-header .close-btn:hover {
+  background: #f1f5f9;
+  color: var(--text-primary);
+}
+
+/* Chat Feed */
+.ai-chat-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* Welcome Page */
+.ai-welcome-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  margin-top: auto;
+  margin-bottom: auto;
+}
+
+.ai-big-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, var(--brand) 0%, #3b82f6 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 16px;
+  color: #ffffff;
+  box-shadow: 0 4px 20px rgba(37, 99, 235, 0.2);
+}
+
+.ai-welcome-container h2 {
+  font-size: 1.5rem;
+  font-weight: 800;
+  margin: 0 0 6px 0;
+  background: linear-gradient(135deg, var(--brand) 0%, #3b82f6 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.ai-welcome-container p {
+  font-size: 0.85rem;
+  color: #64748b;
+  margin: 0 0 24px 0;
+}
+
+.ai-mode-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  width: 100%;
+  margin-bottom: 24px;
+}
+
+.mode-card {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 14px;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.mode-card.active, .mode-card:hover {
+  border-color: var(--brand);
+  box-shadow: 0 0 12px rgba(37, 99, 235, 0.1);
+}
+
+.mode-card h4 {
+  font-size: 0.85rem;
+  font-weight: 700;
+  margin: 0 0 6px 0;
+  color: #1e293b;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mode-card p {
+  font-size: 0.72rem;
+  color: #64748b;
+  margin: 0;
+  line-height: 1.4;
+}
+
+.great-for-box {
+  border-left: 2px solid var(--brand);
+  padding-left: 12px;
+  text-align: left;
+  width: 100%;
+  font-size: 0.8rem;
+}
+
+.great-for-box b {
+  color: #1e293b;
+  display: block;
+  margin-bottom: 6px;
+}
+
+.great-for-box ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: #64748b;
+}
+
+/* Chat Messages */
+.chat-message {
+  display: flex;
+  flex-direction: column;
+  max-width: 85%;
+  padding: 12px 16px;
+  border-radius: 12px;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.chat-message.user {
+  background: var(--brand);
+  color: #ffffff;
+  align-self: flex-end;
+  border-bottom-right-radius: 2px;
+}
+
+.chat-message.assistant {
+  background: #f8fafc;
+  color: #1e293b;
+  align-self: flex-start;
+  border-bottom-left-radius: 2px;
+  border: 1px solid #e2e8f0;
+}
+
+/* Input Area */
+.ai-input-area {
+  padding: 20px;
+  border-top: 1px solid #f1f5f9;
+  background: #ffffff;
+}
+
+.ai-input-container {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ai-input-container textarea {
+  background: transparent;
+  border: none;
+  color: #1e293b;
+  font-size: 0.82rem;
+  resize: none;
+  outline: none;
+  font-family: inherit;
+}
+
+.ai-input-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.ai-input-left-buttons {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: #64748b;
+}
+
+.ai-input-left-buttons button {
+  background: transparent;
+  border: none;
+  color: #64748b;
+  cursor: pointer;
+  padding: 2px;
+}
+
+.ai-input-left-buttons button:hover {
+  color: var(--brand);
+}
+
+.ai-input-right-buttons {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.autopilot-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.72rem;
+  color: #64748b;
+}
+
+/* Toggle Switch Style */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 28px;
+  height: 16px;
+}
+
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background-color: #cbd5e1;
+  transition: .2s;
+  border-radius: 16px;
+}
+
+.slider:before {
+  position: absolute;
+  content: "";
+  height: 12px;
+  width: 12px;
+  left: 2px;
+  bottom: 2px;
+  background-color: white;
+  transition: .2s;
+  border-radius: 50%;
+}
+
+input:checked + .slider {
+  background-color: var(--brand);
+}
+
+input:checked + .slider:before {
+  transform: translateX(12px);
+}
+
+.send-msg-btn {
+  background: var(--brand);
+  color: #ffffff;
+  border: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.send-msg-btn:hover {
+  background: var(--brand-dark);
+}
+
+.ai-quick-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  margin-top: 24px;
+}
+
+.suggest-pill {
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 0.78rem;
+  color: #475569;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-weight: 500;
+}
+
+.suggest-pill:hover {
+  background: var(--brand-light);
+  border-color: var(--brand);
+  color: var(--brand-dark);
+  transform: translateY(-1px);
+}
+
+/* ── FILTERS DROPDOWN ── */
+.dropdown-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1090;
+  background: transparent;
+}
+
+.filter-dropdown-container {
+  z-index: 1100;
+}
+
+.filter-trigger {
+  transition: all 0.15s ease;
+}
+
+.filter-trigger.btn-active {
+  border-color: var(--brand);
+  background: var(--brand-light);
+  color: var(--brand-dark);
+}
+
+.filter-dropdown-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 6px;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.08);
+  padding: 8px;
+  min-width: 200px;
+  z-index: 1100;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dropdown-header {
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 6px 10px 4px;
+}
+
+.dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  background: none;
+  border-radius: 8px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.dropdown-item:hover {
+  background: #f1f5f9;
+}
+
+.dropdown-item.active {
+  background: rgba(79, 70, 229, 0.05);
+  color: var(--brand);
+  font-weight: 600;
+}
+
+.status-indicator {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: transparent;
+}
+
+.status-indicator.active {
+  background: var(--brand);
+}
+
+/* ── BUTTON SPARKLE SPIN ON HOVER ── */
+.btn-consult-ai:hover :deep(.icon) {
+  animation: spin-slow 8s linear infinite;
+  transform-origin: center;
+}
+
+@keyframes spin-slow {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+</style>

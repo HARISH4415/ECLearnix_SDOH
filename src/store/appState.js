@@ -1,0 +1,288 @@
+import { ref } from 'vue'
+
+export const isLoggedIn = ref(localStorage.getItem('docpat_logged_in') === 'true')
+
+const getInitialAnalyzed = () => {
+  return localStorage.getItem('docpat_is_analyzed') === 'true'
+}
+export const isAnalyzed = ref(getInitialAnalyzed())
+export const showLoginScreen = ref(false)
+export const isAdmin = ref(localStorage.getItem('user_role') === 'admin')
+
+const getInitialMlPrediction = () => {
+  try {
+    const s = localStorage.getItem('docpat_ml_prediction')
+    if (s) return JSON.parse(s)
+  } catch (e) {}
+  return null
+}
+export const mlPredictionResults = ref(getInitialMlPrediction())
+
+const getInitialPredictionModel = () => {
+  try {
+    const s = localStorage.getItem('docpat_prediction_model')
+    if (s) return JSON.parse(s)
+  } catch (e) {}
+  return null
+}
+export const predictionModelResults = ref(getInitialPredictionModel())
+export const ocrExtractedJson = ref(null)
+export const mlInputPayload = ref(null)
+export const agentReport = ref(null)
+export const isAgentLoading = ref(false)
+export const locationRecords = ref([]) // Array supporting up to 5 uploaded locations
+export const isAiDrawerOpen = ref(false)
+
+export function setAgentReport(report) {
+  agentReport.value = report
+}
+
+
+export function setLocationRecords(records) {
+  if (Array.isArray(records)) {
+    locationRecords.value = records.slice(0, 5)
+    try {
+      localStorage.setItem('docpat_location_records', JSON.stringify(locationRecords.value))
+    } catch (e) {}
+  }
+}
+
+export function toggleAiDrawer(val) {
+  if (typeof val === 'boolean') {
+    isAiDrawerOpen.value = val
+  } else {
+    isAiDrawerOpen.value = !isAiDrawerOpen.value
+  }
+}
+
+export function setMlInputPayload(data) {
+  mlInputPayload.value = data
+}
+
+const getInitialPatientData = () => {
+  try {
+    const saved = localStorage.getItem('docpat_patient_data')
+    if (saved) return JSON.parse(saved)
+  } catch (e) {}
+  return {
+    name: '',
+    age: '',
+    gender: 'Female',
+    state: '',
+    county: '',
+    diabetes: 'No',
+    hypertension: 'No',
+    heart_disease: 'No',
+    asthma: 'No',
+    previous_admission: 'No',
+    er_visits: 0,
+    lat: 41.4993,
+    long: -81.6944,
+    medication_adherence: 85,
+  }
+}
+
+export const patientData = ref(getInitialPatientData())
+
+const getInitialLocations = () => {
+  try {
+    const saved = localStorage.getItem('docpat_location_records')
+    if (saved) return JSON.parse(saved)
+  } catch (e) {}
+  return []
+}
+locationRecords.value = getInitialLocations()
+
+export const currentUserName = ref(localStorage.getItem('user_name') || '')
+export const currentUserEmail = ref(localStorage.getItem('user_email') || '')
+export const currentUserId = ref(localStorage.getItem('user_id') || '')
+
+const savedPlan = localStorage.getItem('user_plan')
+export const userPlan = ref((localStorage.getItem('docpat_logged_in') === 'true' && savedPlan && savedPlan !== 'none') ? savedPlan : null)
+export const userTokensAllocated = ref(parseInt(localStorage.getItem('tokens_allocated') || '250000'))
+export const userTokensUsed = ref(parseInt(localStorage.getItem('tokens_used') || '0'))
+export const isTokenLimitReached = ref(false)
+
+export function setLoggedIn(val, userData = null) {
+  isLoggedIn.value = val
+  localStorage.setItem('docpat_logged_in', val ? 'true' : 'false')
+  if (val && userData) {
+    if (userData.name) {
+      currentUserName.value = userData.name
+      localStorage.setItem('user_name', userData.name)
+    }
+    if (userData.email) {
+      currentUserEmail.value = userData.email
+      localStorage.setItem('user_email', userData.email)
+    }
+    if (userData.id) {
+      currentUserId.value = String(userData.id)
+      localStorage.setItem('user_id', String(userData.id))
+    }
+  } else if (!val) {
+    isAdmin.value = false
+    localStorage.removeItem('user_role')
+  }
+}
+
+export async function logoutUser(backendUrl = 'http://localhost:8000') {
+  const storedEmail = currentUserEmail.value || localStorage.getItem('user_email')
+  try {
+    if (storedEmail) {
+      await fetch(`${backendUrl}/api/auth/logout`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: storedEmail })
+      })
+    }
+  } catch (err) {
+    console.warn('Logout request note:', err)
+  }
+
+  // Clear all localStorage and reactive session references
+  localStorage.removeItem('docpat_logged_in')
+  localStorage.removeItem('user_email')
+  localStorage.removeItem('user_name')
+  localStorage.removeItem('user_id')
+  localStorage.removeItem('user_plan')
+  localStorage.removeItem('user_role')
+  localStorage.removeItem('docpat_is_analyzed')
+  localStorage.removeItem('docpat_ml_prediction')
+  localStorage.removeItem('docpat_prediction_model')
+
+  isLoggedIn.value = false
+  isAdmin.value = false
+  isAnalyzed.value = false
+  userPlan.value = null
+  currentUserName.value = ''
+  currentUserEmail.value = ''
+  currentUserId.value = ''
+  mlPredictionResults.value = null
+  predictionModelResults.value = null
+  ocrExtractedJson.value = null
+  patientData.value = {
+    name: '',
+    age: '',
+    gender: 'Female',
+    diabetes: 'No',
+    hypertension: 'No',
+    heart_disease: 'No',
+    asthma: 'No',
+    previous_admission: 'No',
+    er_visits: 0,
+    lat: 41.4993,
+    long: -81.6944,
+    medication_adherence: 85,
+  }
+}
+
+export async function syncUserSubscription(backendUrl = 'http://localhost:8000') {
+  const storedEmail = currentUserEmail.value || localStorage.getItem('user_email')
+  const storedId = currentUserId.value || localStorage.getItem('user_id')
+  if (!storedEmail && !storedId) {
+    setUserPlan(null)
+    return null
+  }
+
+  try {
+    const params = new URLSearchParams()
+    if (storedEmail) params.append('email', storedEmail.trim().toLowerCase())
+    if (storedId) params.append('user_id', storedId)
+
+    const res = await fetch(`${backendUrl}/api/subscriptions/latest?${params.toString()}`)
+    if (res.ok) {
+      const data = await res.json()
+      if (data && data.plan && data.subscribe) {
+        setUserPlan(data.plan.toLowerCase())
+        if (typeof data.tokens_allocated === 'number') {
+          userTokensAllocated.value = data.tokens_allocated
+          localStorage.setItem('tokens_allocated', String(data.tokens_allocated))
+        }
+        if (typeof data.tokens_used === 'number') {
+          userTokensUsed.value = data.tokens_used
+          localStorage.setItem('tokens_used', String(data.tokens_used))
+        }
+        if (data.tokens_allocated !== -1 && data.tokens_used >= data.tokens_allocated) {
+          isTokenLimitReached.value = true
+        } else {
+          isTokenLimitReached.value = false
+        }
+        return data.plan.toLowerCase()
+      } else {
+        setUserPlan(null)
+        return null
+      }
+    }
+  } catch (err) {
+    console.warn('Subscription sync error:', err)
+  }
+  return null
+}
+
+export function setUserPlan(plan) {
+  if (plan && plan !== 'none') {
+    userPlan.value = plan.toLowerCase()
+    localStorage.setItem('user_plan', plan.toLowerCase())
+  } else {
+    userPlan.value = null
+    localStorage.removeItem('user_plan')
+  }
+}
+
+export function setAnalyzed(val) {
+  isAnalyzed.value = val
+  try {
+    localStorage.setItem('docpat_is_analyzed', val ? 'true' : 'false')
+  } catch (e) {}
+}
+
+export function setPatientData(data) {
+  patientData.value = {
+    previous_admission: 'No',
+    er_visits: 0,
+    medication_adherence: 85,
+    ...data
+  }
+  try {
+    localStorage.setItem('docpat_patient_data', JSON.stringify(patientData.value))
+  } catch (e) {}
+}
+
+export function setShowLoginScreen(val) {
+  showLoginScreen.value = val
+}
+
+export function setAdmin(val) {
+  isAdmin.value = val
+  if (val) {
+    localStorage.setItem('user_role', 'admin')
+  } else {
+    localStorage.removeItem('user_role')
+  }
+}
+
+export function setMlPredictionResults(val) {
+  mlPredictionResults.value = val
+  try {
+    if (val) {
+      localStorage.setItem('docpat_ml_prediction', JSON.stringify(val))
+    } else {
+      localStorage.removeItem('docpat_ml_prediction')
+    }
+  } catch (e) {}
+}
+
+export function setPredictionModelResults(val) {
+  predictionModelResults.value = val
+  try {
+    if (val) {
+      localStorage.setItem('docpat_prediction_model', JSON.stringify(val))
+    } else {
+      localStorage.removeItem('docpat_prediction_model')
+    }
+  } catch (e) {}
+}
+
+export function setOcrExtractedJson(val) {
+  ocrExtractedJson.value = val
+}

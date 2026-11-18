@@ -1,0 +1,89 @@
+%PDF-1.4
+1 0 obj
+<</Type /Catalog /Pages 2 0 R>>
+endobj
+2 0 obj
+<</Type /Pages /Kids [3 0 R] /Count 1>>
+endobj
+3 0 obj
+<</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources <</Font <</F1 4 0 R>>>> /Contents 5 0 R>>
+endobj
+4 0 obj
+<</Type /Font /Subtype /Type1 /BaseFont /Helvetica>>
+endobj
+5 0 obj
+<</Length 1335>>
+stream
+BT
+/F1 11 Tf
+50 740 Td
+14 TL
+(CAREEQUITY CLINICAL & LAB SUMMARY REPORT) '
+(Comprehensive Medical Assessment — Patient ID: ROBERT_CHEN) '
+(1. Patient Demographics & Body Metrics) '
+(Parameter) '
+(Patient Value) '
+(Parameter) '
+(Patient Value) '
+(Full Name) '
+(Robert Chen) '
+(Age) '
+(54 years) '
+(Sex / Gender) '
+(Female) '
+(BMI \(kg/m²\)) '
+(26.0) '
+(Height \(cm\)) '
+(170 cm) '
+(Weight \(kg\)) '
+(75 kg) '
+(2. Clinical Vitals & Laboratory Findings) '
+(Clinical Indicator) '
+(Measured Value) '
+(Reference Range) '
+(Evaluation / Status) '
+(Systolic Blood Pressure) '
+(138 mmHg) '
+(90 - 120 mmHg) '
+(Elevated) '
+(Diastolic Blood Pressure) '
+(88 mmHg) '
+(60 - 80 mmHg) '
+(Elevated) '
+(HbA1c Glycated Hemoglobin) '
+(6.5 %) '
+(< 5.7 %) '
+(Prediabetic / High) '
+(Fasting Blood Glucose) '
+(130 mg/dL) '
+(70 - 99 mg/dL) '
+(Elevated) '
+(Total Cholesterol) '
+(210 mg/dL) '
+(< 200 mg/dL) '
+(Borderline High) '
+(Smoking History) '
+(Former) '
+(Non-Smoker) '
+(Monitored) '
+(3. Target Geographic Assessment Locations) '
+(• Location 1: Limestone County, AL, United States) '
+(• Location 2: Columbia County, GA, United States) '
+(4. Clinical Notes & Observations) '
+(Patient presents with elevated blood pressure \(138/88 mmHg\), prediabetic HbA1c levels \(6.5%\), and borderline high cholesterol \(210 mg/dL\). History of former smoking.) '
+ET
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000056 00000 n 
+0000000111 00000 n 
+0000000231 00000 n 
+0000000299 00000 n 
+trailer
+<</Size 6 /Root 1 0 R>>
+startxref
+1676
+%%EOF
