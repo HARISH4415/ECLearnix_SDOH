@@ -5,7 +5,7 @@ import IconBase from '../components/dashboard/IconBase.vue'
 import { patientData, setAnalyzed, setPatientData, setLocationRecords, isLoggedIn, setLoggedIn, setShowLoginScreen, setMlPredictionResults, setPredictionModelResults, setOcrExtractedJson, setMlInputPayload, setAgentReport, isAgentLoading, currentUserName, logoutUser, userPlan, syncUserSubscription } from '../store/appState'
 import { MAIN_BACKEND_URL, SYSTEM_BACKEND_URL, PREDICTION_BACKEND_URL, OCR_BACKEND_URL, AGENT_BACKEND_URL } from '../config'
 
-import { US_STATES, US_COUNTIES_BY_STATE } from '../data/usData.js'
+import { US_STATES, US_COUNTIES_BY_STATE, getCountyCoords } from '../data/usData.js'
 import { extractDocumentText, parseClinicalText } from '../utils/documentExtractor.js'
 import {
   saveAssessmentToSupabase,
@@ -259,6 +259,9 @@ onMounted(() => {
 
 const viewHistoryItem = (item) => {
   if (item) {
+    const histCounty = item.county || item.extra_data?.county || 'Cuyahoga County'
+    const histState = item.state || item.extra_data?.state || 'OH'
+    const hCoords = getCountyCoords(histCounty, histState) || { lat: 41.4993, lon: -81.6944 }
     setPatientData({
       name: item.name || 'Patient Record',
       age: item.age || 45,
@@ -269,14 +272,14 @@ const viewHistoryItem = (item) => {
       asthma: item.asthma || 'No',
       previous_admission: item.previous_admission || 'No',
       er_visits: item.er_visits || 0,
-      lat: item.lat || item.extra_data?.lat || 41.4993,
-      long: item.long || item.extra_data?.long || -81.6944,
+      lat: item.lat || item.extra_data?.lat || hCoords.lat,
+      long: item.long || item.extra_data?.long || hCoords.lon,
       medication_adherence: item.medication_adherence || item.extra_data?.medication_adherence || 85,
       height_cm: item.height_cm || item.extra_data?.height_cm || 170.0,
       weight_kg: item.weight_kg || item.extra_data?.weight_kg || 70.0,
       notes: item.notes || item.extra_data?.notes || '',
-      county: item.county || item.extra_data?.county || 'Cuyahoga County',
-      state: item.state || item.extra_data?.state || 'OH'
+      county: histCounty,
+      state: histState
     })
     const historyLocations = item.extra_data?.all_locations || (item.extra_data?.locations_list ? item.extra_data.locations_list.map(l => ({ county: l[0], state: l[1], country: l[2] || 'United States' })) : [{ county: item.county || item.extra_data?.county || 'Cuyahoga County', state: item.state || item.extra_data?.state || 'Ohio', country: 'United States' }])
     setLocationRecords(historyLocations)
@@ -595,6 +598,7 @@ const checkOcrBackendHealth = async () => {
 // Build standard assessment payload from the current form inputs
 const buildAssessmentPayload = () => {
   const primaryLoc = (form.value.locations && form.value.locations[0]) || { country: 'United States', state: 'Ohio', county: 'Cuyahoga County' }
+  const pCoords = getCountyCoords(primaryLoc.county, primaryLoc.state) || { lat: 41.4993, lon: -81.6944 }
   const cleanEmail = (localStorage.getItem('user_email') || '').trim().toLowerCase()
   const locationsListOfLists = (form.value.locations || []).map(loc => [
     loc.county || '',
@@ -620,12 +624,16 @@ const buildAssessmentPayload = () => {
     smoking_status: form.value.smoking_status || 'Never',
     height_cm: parseFloat(form.value.height_cm) || 165.0,
     weight_kg: parseFloat(form.value.weight_kg) || 62.0,
+    lat: pCoords.lat,
+    long: pCoords.lon,
     county: primaryLoc.county || 'Cuyahoga County',
     state: primaryLoc.state || 'Ohio',
     country: primaryLoc.country || 'United States',
     notes: form.value.notes || '',
     is_favorite: false,
     extra_data: {
+      lat: pCoords.lat,
+      long: pCoords.lon,
       county: primaryLoc.county,
       state: primaryLoc.state,
       country: primaryLoc.country,
@@ -1108,8 +1116,11 @@ const handleAnalyze = async () => {
 
   // Save patient data in state including locations_list
   const primaryLoc = form.value.locations[0] || { county: 'Cuyahoga County', state: 'Ohio', country: 'United States' }
+  const pCoords = getCountyCoords(primaryLoc.county, primaryLoc.state) || { lat: 41.4993, lon: -81.6944 }
   setPatientData({
     ...form.value,
+    lat: pCoords.lat,
+    long: pCoords.lon,
     state: primaryLoc.state || form.value.state || 'Ohio',
     county: primaryLoc.county || form.value.county || 'Cuyahoga County',
     country: primaryLoc.country || 'United States',
