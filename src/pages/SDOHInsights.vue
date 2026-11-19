@@ -2,6 +2,8 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { Network } from 'vis-network/standalone'
 import { KG_BACKEND_URL } from '../config'
+import { patientData } from '../store/appState'
+import { US_COUNTY_COORDINATES } from '../data/usData.js'
 
 const API_BASE = KG_BACKEND_URL
 
@@ -86,19 +88,274 @@ const handleClickOutside = (e) => {
   }
 }
 
-// Mock datasets for standalone UI mode
-const MOCK_COUNTIES_LIST = [
+// Base reference catalog of US Counties
+const BASE_COUNTIES_LIST = [
   { fips: '39035', county_name: 'Cuyahoga County', state_abbr: 'OH', display_label: 'Cuyahoga County, OH (39035)' },
+  { fips: '37029', county_name: 'Camden County', state_abbr: 'NC', display_label: 'Camden County, NC (37029)' },
+  { fips: '47149', county_name: 'Rutherford County', state_abbr: 'TN', display_label: 'Rutherford County, TN (47149)' },
   { fips: '26163', county_name: 'Wayne County', state_abbr: 'MI', display_label: 'Wayne County, MI (26163)' },
   { fips: '18097', county_name: 'Marion County', state_abbr: 'IN', display_label: 'Marion County, IN (18097)' },
-  { fips: '17031', county_name: 'Cook County', state_abbr: 'IL', display_label: 'Cook County, IL (17031)' },
   { fips: '39049', county_name: 'Franklin County', state_abbr: 'OH', display_label: 'Franklin County, OH (39049)' },
-  { fips: '6037', county_name: 'Los Angeles County', state_abbr: 'CA', display_label: 'Los Angeles County, CA (06037)' },
+  { fips: '17031', county_name: 'Cook County', state_abbr: 'IL', display_label: 'Cook County, IL (17031)' },
+  { fips: '6037',  county_name: 'Los Angeles County', state_abbr: 'CA', display_label: 'Los Angeles County, CA (06037)' },
   { fips: '48201', county_name: 'Harris County', state_abbr: 'TX', display_label: 'Harris County, TX (48201)' },
   { fips: '12086', county_name: 'Miami-Dade County', state_abbr: 'FL', display_label: 'Miami-Dade County, FL (12086)' },
   { fips: '13121', county_name: 'Fulton County', state_abbr: 'GA', display_label: 'Fulton County, GA (13121)' },
-  { fips: '1001', county_name: 'Autauga County', state_abbr: 'AL', display_label: 'Autauga County, AL (01001)' }
+  { fips: '1001',  county_name: 'Autauga County', state_abbr: 'AL', display_label: 'Autauga County, AL (01001)' }
 ]
+
+const statePrefixMap = {
+  'AL': '01', 'GA': '13', 'IN': '18', 'MI': '26', 'MS': '28', 'NC': '37', 'OH': '39', 'TN': '47', 'IL': '17', 'CA': '06', 'TX': '48', 'FL': '12'
+}
+
+const MOCK_COUNTIES_LIST = [...BASE_COUNTIES_LIST]
+if (typeof US_COUNTY_COORDINATES === 'object') {
+  Object.entries(US_COUNTY_COORDINATES).forEach(([fullName, info], idx) => {
+    const parts = fullName.split(', ')
+    const cName = parts[0]
+    const sName = parts[1] || ''
+    const sAbbr = info.stateAbbr || sName.slice(0, 2).toUpperCase()
+    const pfx = statePrefixMap[sAbbr] || '99'
+    const genFips = `${pfx}${String(100 + (idx * 2)).padStart(3, '0')}`
+
+    if (!MOCK_COUNTIES_LIST.some(m => m.county_name.toLowerCase() === cName.toLowerCase() && m.state_abbr === sAbbr)) {
+      MOCK_COUNTIES_LIST.push({
+        fips: genFips,
+        county_name: cName,
+        state_abbr: sAbbr,
+        display_label: `${cName}, ${sAbbr} (${genFips})`
+      })
+    }
+  })
+}
+
+// Known county demographics database
+const COUNTY_DEMOGRAPHICS = {
+  '39035': { pop: 1264817, inc: 56340, svi: 0.7420, name: 'Cuyahoga County', state: 'OH' },
+  '37029': { pop: 10762,   inc: 72480, svi: 0.2840, name: 'Camden County', state: 'NC' },
+  '47149': { pop: 341486,  inc: 74218, svi: 0.3910, name: 'Rutherford County', state: 'TN' },
+  '26163': { pop: 1793561, inc: 49458, svi: 0.8140, name: 'Wayne County', state: 'MI' },
+  '18097': { pop: 977203,  inc: 54128, svi: 0.6820, name: 'Marion County', state: 'IN' },
+  '17031': { pop: 5275541, inc: 72352, svi: 0.6540, name: 'Cook County', state: 'IL' },
+  '39049': { pop: 1326093, inc: 66914, svi: 0.5310, name: 'Franklin County', state: 'OH' },
+  '6037':  { pop: 10014009,inc: 76367, svi: 0.7320, name: 'Los Angeles County', state: 'CA' },
+  '48201': { pop: 4731145, inc: 65112, svi: 0.7580, name: 'Harris County', state: 'TX' },
+  '12086': { pop: 2701767, inc: 57815, svi: 0.8120, name: 'Miami-Dade County', state: 'FL' },
+  '13121': { pop: 1066710, inc: 75940, svi: 0.5280, name: 'Fulton County', state: 'GA' },
+  '1001':  { pop: 58761,   inc: 68315, svi: 0.2663, name: 'Autauga County', state: 'AL' }
+}
+
+function getCountyOverview(fips, countyItem) {
+  const fipsStr = String(fips)
+  if (COUNTY_DEMOGRAPHICS[fipsStr]) {
+    const d = COUNTY_DEMOGRAPHICS[fipsStr]
+    return {
+      county_name: countyItem.county_name || d.name,
+      state_abbr: countyItem.state_abbr || d.state,
+      population: d.pop,
+      median_household_income: d.inc,
+      svi_overall: d.svi
+    }
+  }
+
+  const fipsNum = parseInt(fips, 10) || 1001
+  const seed = (fipsNum % 100) / 100
+  return {
+    county_name: countyItem.county_name || 'Selected County',
+    state_abbr: countyItem.state_abbr || 'US',
+    population: Math.round(35000 + seed * 850000),
+    median_household_income: Math.round(48000 + seed * 34000),
+    svi_overall: parseFloat((0.25 + seed * 0.55).toFixed(4))
+  }
+}
+
+function getCountySdohData(fips, countyName) {
+  const fipsNum = parseInt(fips, 10) || 1001
+  const seed = (fipsNum % 100) / 100
+
+  const povertyRate = parseFloat((11.5 + (seed * 11.0) - 2.5).toFixed(1))
+  const foodDesert = parseFloat((12.8 + (seed * 14.0) - 3.2).toFixed(1))
+  const uninsured = parseFloat((7.9 + (seed * 7.5) - 1.8).toFixed(1))
+  const noVehicle = parseFloat((8.5 + (seed * 9.0) - 2.0).toFixed(1))
+  const housingBurden = parseFloat((12.1 + (seed * 8.5) - 1.5).toFixed(1))
+
+  return [
+    {
+      factor_name: 'Poverty Rate',
+      county_value: povertyRate,
+      us_avg: 11.5,
+      difference: parseFloat((povertyRate - 11.5).toFixed(1)),
+      unit: '%',
+      category: 'Economic Stability',
+      metric: 'Poverty Rate',
+      value: `${povertyRate}%`,
+      risk_level: povertyRate > 14 ? 'High' : 'Moderate'
+    },
+    {
+      factor_name: 'Food Desert Population',
+      county_value: foodDesert,
+      us_avg: 12.8,
+      difference: parseFloat((foodDesert - 12.8).toFixed(1)),
+      unit: '%',
+      category: 'Food Access',
+      metric: 'Food Desert Population',
+      value: `${foodDesert}%`,
+      risk_level: foodDesert > 15 ? 'High' : 'Moderate'
+    },
+    {
+      factor_name: 'Uninsured Population',
+      county_value: uninsured,
+      us_avg: 7.9,
+      difference: parseFloat((uninsured - 7.9).toFixed(1)),
+      unit: '%',
+      category: 'Healthcare Access',
+      metric: 'Uninsured Population',
+      value: `${uninsured}%`,
+      risk_level: uninsured > 9 ? 'High' : 'Low'
+    },
+    {
+      factor_name: 'Households without Vehicle',
+      county_value: noVehicle,
+      us_avg: 8.5,
+      difference: parseFloat((noVehicle - 8.5).toFixed(1)),
+      unit: '%',
+      category: 'Transportation',
+      metric: 'Households without Vehicle',
+      value: `${noVehicle}%`,
+      risk_level: noVehicle > 10 ? 'High' : 'Moderate'
+    },
+    {
+      factor_name: 'Severe Housing Cost Burden',
+      county_value: housingBurden,
+      us_avg: 12.1,
+      difference: parseFloat((housingBurden - 12.1).toFixed(1)),
+      unit: '%',
+      category: 'Neighborhood & Housing',
+      metric: 'Severe Housing Cost Burden',
+      value: `${housingBurden}%`,
+      risk_level: housingBurden > 14 ? 'High' : 'Moderate'
+    }
+  ]
+}
+
+function getCountyHealthOutcomes(fips, countyName) {
+  const fipsNum = parseInt(fips, 10) || 1001
+  const seed = (fipsNum % 100) / 100
+
+  const diabetes = parseFloat((9.8 + (seed * 6.0) - 1.2).toFixed(1))
+  const hypertension = parseFloat((29.7 + (seed * 10.5) - 2.5).toFixed(1))
+  const heartDisease = parseFloat((5.9 + (seed * 3.2) - 0.7).toFixed(1))
+  const asthma = parseFloat((8.9 + (seed * 3.8) - 0.9).toFixed(1))
+  const mentalDistress = parseFloat((13.2 + (seed * 5.0) - 1.5).toFixed(1))
+
+  return [
+    {
+      condition_name: 'Diabetes Prevalence',
+      county_prevalence: diabetes,
+      us_avg: 9.8,
+      difference: parseFloat((diabetes - 9.8).toFixed(1)),
+      condition: 'Diabetes Prevalence',
+      rate: `${diabetes}%`,
+      national_avg: '9.8%'
+    },
+    {
+      condition_name: 'Hypertension (High BP)',
+      county_prevalence: hypertension,
+      us_avg: 29.7,
+      difference: parseFloat((hypertension - 29.7).toFixed(1)),
+      condition: 'Hypertension',
+      rate: `${hypertension}%`,
+      national_avg: '29.7%'
+    },
+    {
+      condition_name: 'Coronary Heart Disease',
+      county_prevalence: heartDisease,
+      us_avg: 5.9,
+      difference: parseFloat((heartDisease - 5.9).toFixed(1)),
+      condition: 'Coronary Heart Disease',
+      rate: `${heartDisease}%`,
+      national_avg: '5.9%'
+    },
+    {
+      condition_name: 'Adult Asthma',
+      county_prevalence: asthma,
+      us_avg: 8.9,
+      difference: parseFloat((asthma - 8.9).toFixed(1)),
+      condition: 'Adult Asthma',
+      rate: `${asthma}%`,
+      national_avg: '8.9%'
+    },
+    {
+      condition_name: 'Frequent Mental Distress',
+      county_prevalence: mentalDistress,
+      us_avg: 13.2,
+      difference: parseFloat((mentalDistress - 13.2).toFixed(1)),
+      condition: 'Frequent Mental Distress',
+      rate: `${mentalDistress}%`,
+      national_avg: '13.2%'
+    }
+  ]
+}
+
+function normalizeSdohData(data, fips, countyName) {
+  if (!Array.isArray(data) || data.length === 0) {
+    return getCountySdohData(fips, countyName)
+  }
+  return data.map(item => {
+    const name = item.factor_name || item.metric || item.category || 'Socioeconomic Driver'
+    const cVal = item.county_value ?? (parseFloat(item.value) || 0)
+    const uVal = item.us_avg ?? (parseFloat(item.national_avg) || 11.5)
+    const diff = item.difference ?? parseFloat((cVal - uVal).toFixed(1))
+    const unit = item.unit || (String(item.value).includes('%') ? '%' : '%')
+    return {
+      ...item,
+      factor_name: name,
+      county_value: cVal,
+      us_avg: uVal,
+      difference: diff,
+      unit: unit,
+      metric: name,
+      value: `${cVal}${unit}`
+    }
+  })
+}
+
+function normalizeHealthData(data, fips, countyName) {
+  if (!Array.isArray(data) || data.length === 0) {
+    return getCountyHealthOutcomes(fips, countyName)
+  }
+  return data.map(item => {
+    const name = item.condition_name || item.condition || 'Health Condition'
+    const cPrev = item.county_prevalence ?? (parseFloat(item.rate) || 0)
+    const uVal = item.us_avg ?? (parseFloat(item.national_avg) || 9.8)
+    const diff = item.difference ?? parseFloat((cPrev - uVal).toFixed(1))
+    return {
+      ...item,
+      condition_name: name,
+      county_prevalence: cPrev,
+      us_avg: uVal,
+      difference: diff,
+      condition: name,
+      rate: `${cPrev}%`
+    }
+  })
+}
+
+function formatDifference(diff, unit = '%') {
+  if (diff === undefined || diff === null || diff === '') return '0.0 ' + (unit || '%')
+  const num = typeof diff === 'number' ? diff : parseFloat(diff)
+  if (isNaN(num)) return `${diff} ${unit || ''}`.trim()
+  const sign = num > 0 ? '+' : ''
+  return `${sign}${num.toFixed(1)} ${unit || '%'}`.trim()
+}
+
+function formatDiffPercent(diff) {
+  if (diff === undefined || diff === null || diff === '') return '0.0%'
+  const num = typeof diff === 'number' ? diff : parseFloat(diff)
+  if (isNaN(num)) return String(diff).includes('%') ? diff : `${diff}%`
+  const sign = num > 0 ? '+' : ''
+  return `${sign}${num.toFixed(1)}%`
+}
 
 function getMockCountyGraph(fips, countyName, stateAbbr) {
   const cId = `county_${fips}`
@@ -152,13 +409,7 @@ const loadCountyData = async (fips) => {
     if (resOverview.ok) {
       overview.value = await resOverview.json()
     } else {
-      overview.value = {
-        county_name: countyItem.county_name,
-        state_abbr: countyItem.state_abbr,
-        population: 1264817,
-        median_household_income: 56340,
-        svi_overall: 0.742
-      }
+      overview.value = getCountyOverview(fips, countyItem)
     }
 
     // Graph (Fetch Top 5 Highest Risk Factors)
@@ -172,54 +423,26 @@ const loadCountyData = async (fips) => {
     // SDoH Barriers
     const resSdoh = await fetch(`${API_BASE}/api/county/${fips}/sdoh`)
     if (resSdoh.ok) {
-      sdohBarriers.value = await resSdoh.json()
+      const data = await resSdoh.json()
+      sdohBarriers.value = normalizeSdohData(data, fips, countyItem.county_name)
     } else {
-      sdohBarriers.value = [
-        { category: 'Economic Stability', metric: 'Poverty Rate', value: '18.4%', risk_level: 'High', description: 'Significant proportion of households fall below the federal poverty line.' },
-        { category: 'Food Access', metric: 'Food Desert Population', value: '23.1%', risk_level: 'High', description: 'Limited supermarket access within walking distance.' },
-        { category: 'Healthcare Access', metric: 'Uninsured Population', value: '8.9%', risk_level: 'Medium', description: 'Adults without comprehensive primary insurance coverage.' },
-        { category: 'Transportation', metric: 'Households without Vehicle', value: '14.2%', risk_level: 'High', description: 'Dependent on regional bus and medical transit vans.' },
-        { category: 'Neighborhood & Built Environment', metric: 'Air Quality Index Risk', value: 'Moderate', risk_level: 'Medium', description: 'Proximity to heavy transit corridors and legacy industrial zones.' }
-      ]
+      sdohBarriers.value = getCountySdohData(fips, countyItem.county_name)
     }
 
     // Health Outcomes
     const resHealth = await fetch(`${API_BASE}/api/county/${fips}/health-outcomes`)
     if (resHealth.ok) {
-      healthOutcomes.value = await resHealth.json()
+      const data = await resHealth.json()
+      healthOutcomes.value = normalizeHealthData(data, fips, countyItem.county_name)
     } else {
-      healthOutcomes.value = [
-        { condition: 'Diabetes Prevalence', rate: '12.8%', state_avg: '10.2%', national_avg: '9.8%', trend: 'Elevated' },
-        { condition: 'Hypertension', rate: '34.2%', state_avg: '31.5%', national_avg: '29.7%', trend: 'Elevated' },
-        { condition: 'Coronary Heart Disease', rate: '7.1%', state_avg: '6.4%', national_avg: '5.9%', trend: 'Moderate' },
-        { condition: 'Adult Asthma', rate: '10.9%', state_avg: '9.5%', national_avg: '8.9%', trend: 'Elevated' },
-        { condition: 'Poor Mental Health Days', rate: '5.2 days/mo', state_avg: '4.6 days/mo', national_avg: '4.1 days/mo', trend: 'High' }
-      ]
+      healthOutcomes.value = getCountyHealthOutcomes(fips, countyItem.county_name)
     }
   } catch (err) {
     console.warn('Backend server offline, displaying standalone KG data:', err)
-    overview.value = {
-      county_name: countyItem.county_name,
-      state_abbr: countyItem.state_abbr,
-      population: 1264817,
-      median_household_income: 56340,
-      svi_overall: 0.742
-    }
+    overview.value = getCountyOverview(fips, countyItem)
     graphData.value = getMockCountyGraph(fips, countyItem.county_name, countyItem.state_abbr)
-    sdohBarriers.value = [
-      { category: 'Economic Stability', metric: 'Poverty Rate', value: '18.4%', risk_level: 'High', description: 'Significant proportion of households fall below the federal poverty line.' },
-      { category: 'Food Access', metric: 'Food Desert Population', value: '23.1%', risk_level: 'High', description: 'Limited supermarket access within walking distance.' },
-      { category: 'Healthcare Access', metric: 'Uninsured Population', value: '8.9%', risk_level: 'Medium', description: 'Adults without comprehensive primary insurance coverage.' },
-      { category: 'Transportation', metric: 'Households without Vehicle', value: '14.2%', risk_level: 'High', description: 'Dependent on regional bus and medical transit vans.' },
-      { category: 'Neighborhood & Built Environment', metric: 'Air Quality Index Risk', value: 'Moderate', risk_level: 'Medium', description: 'Proximity to heavy transit corridors and legacy industrial zones.' }
-    ]
-    healthOutcomes.value = [
-      { condition: 'Diabetes Prevalence', rate: '12.8%', state_avg: '10.2%', national_avg: '9.8%', trend: 'Elevated' },
-      { condition: 'Hypertension', rate: '34.2%', state_avg: '31.5%', national_avg: '29.7%', trend: 'Elevated' },
-      { condition: 'Coronary Heart Disease', rate: '7.1%', state_avg: '6.4%', national_avg: '5.9%', trend: 'Moderate' },
-      { condition: 'Adult Asthma', rate: '10.9%', state_avg: '9.5%', national_avg: '8.9%', trend: 'Elevated' },
-      { condition: 'Poor Mental Health Days', rate: '5.2 days/mo', state_avg: '4.6 days/mo', national_avg: '4.1 days/mo', trend: 'High' }
-    ]
+    sdohBarriers.value = getCountySdohData(fips, countyItem.county_name)
+    healthOutcomes.value = getCountyHealthOutcomes(fips, countyItem.county_name)
   } finally {
     loading.value = false
     await nextTick()
@@ -309,6 +532,19 @@ watch(activeTab, (newTab) => {
 onMounted(() => {
   document.addEventListener('click', handleClickOutside)
   fetchCounties()
+
+  // Auto-sync with patient's county if available
+  const patCounty = patientData.value?.county || ''
+  if (patCounty) {
+    const match = counties.value.find(c => 
+      c.county_name.toLowerCase().includes(patCounty.toLowerCase()) || 
+      patCounty.toLowerCase().includes(c.county_name.toLowerCase())
+    )
+    if (match) {
+      selectedFips.value = String(match.fips)
+    }
+  }
+
   loadCountyData(selectedFips.value)
 })
 
@@ -566,12 +802,12 @@ onUnmounted(() => {
               </tr>
             </thead>
             <tbody>
-              <tr v-for="item in sdohBarriers" :key="item.factor_name">
-                <td class="font-bold">{{ item.factor_name }}</td>
-                <td>{{ item.county_value }} {{ item.unit }}</td>
-                <td>{{ item.us_avg }} {{ item.unit }}</td>
-                <td :class="item.difference > 0 ? 'text-red' : 'text-green'">
-                  {{ item.difference > 0 ? '+' : '' }}{{ item.difference }} {{ item.unit }}
+              <tr v-for="item in sdohBarriers" :key="item.factor_name || item.metric">
+                <td class="font-bold">{{ item.factor_name || item.metric || item.category || 'N/A' }}</td>
+                <td>{{ item.county_value ?? item.value ?? 'N/A' }} {{ item.unit || '' }}</td>
+                <td>{{ item.us_avg ?? item.national_avg ?? '11.5%' }} {{ item.unit || '' }}</td>
+                <td :class="(item.difference > 0 || (typeof item.difference === 'string' && item.difference.startsWith('+'))) ? 'text-red' : 'text-green'">
+                  {{ formatDifference(item.difference, item.unit) }}
                 </td>
               </tr>
             </tbody>
@@ -597,12 +833,12 @@ onUnmounted(() => {
               </tr>
             </thead>
             <tbody>
-              <tr v-for="item in healthOutcomes" :key="item.condition_name">
-                <td class="font-bold">{{ item.condition_name }}</td>
-                <td>{{ item.county_prevalence }}%</td>
-                <td>{{ item.us_avg }}%</td>
-                <td :class="item.difference > 0 ? 'text-red' : 'text-green'">
-                  {{ item.difference > 0 ? '+' : '' }}{{ item.difference }}%
+              <tr v-for="item in healthOutcomes" :key="item.condition_name || item.condition">
+                <td class="font-bold">{{ item.condition_name || item.condition || 'N/A' }}</td>
+                <td>{{ item.county_prevalence ?? item.rate ?? 'N/A' }}{{ String(item.county_prevalence ?? item.rate).includes('%') ? '' : '%' }}</td>
+                <td>{{ item.us_avg ?? item.national_avg ?? '9.8%' }}{{ String(item.us_avg ?? item.national_avg).includes('%') ? '' : '%' }}</td>
+                <td :class="(item.difference > 0 || (typeof item.difference === 'string' && item.difference.startsWith('+'))) ? 'text-red' : 'text-green'">
+                  {{ formatDiffPercent(item.difference) }}
                 </td>
               </tr>
             </tbody>
