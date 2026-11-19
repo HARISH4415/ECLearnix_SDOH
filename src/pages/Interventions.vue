@@ -1,9 +1,13 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
+import { useRouter } from 'vue-router'
 const microscopeSrc = ref(`/assets/microscope.gif?t=${Date.now()}`)
 import IconBase from '../components/dashboard/IconBase.vue'
 import { isAnalyzed, patientData, mlPredictionResults, predictionModelResults } from '../store/appState'
 import { NGO_BACKEND_URL } from '../config'
+import { findCountyRecord } from '../data/countySdohDataset.js'
+
+const router = useRouter()
 
 // NGO Connect State
 const matchedNGOs = ref([])
@@ -95,6 +99,52 @@ const outreachData = ref({
   cohortSize: '24,500 members',
   startDate: '2025-11-15'
 })
+
+// Active Location & Live Campaign computed based on patient's current place
+const activeLocationRecord = computed(() => {
+  const p = patientData.value || {}
+  const rawCounty = p.county || selectedCounty.value || ''
+  const rawState = p.state || ''
+  return findCountyRecord(rawCounty, rawState)
+})
+
+const activeCountyCampaign = computed(() => {
+  const loc = activeLocationRecord.value
+  const cityName = loc.county_name.replace(/\s+County$/i, '').trim() || loc.county_name
+  const state = loc.state_abbr || 'OH'
+  const isHighRisk = (loc.svi_overall > 0.6) || (loc.poverty_rate > 15) || (loc.food_insecurity > 15)
+
+  return {
+    id: `camp-${loc.fips}`,
+    name: 'Free Mobile Health & SDOH Screening Truck',
+    badge: 'LIVE CAMPAIGN',
+    status: 'Active Today',
+    hours: 'Today: 9:00 AM - 4:00 PM',
+    locationName: `Downtown Civic Plaza, ${cityName}`,
+    fullLocation: `${cityName}, ${state}`,
+    address: `Downtown Civic Plaza, ${cityName}, ${state}`,
+    phone: '(555) 019-2831',
+    website: 'https://careequity.org/mobile-screening',
+    eligibility: `Open to all ${cityName} and ${loc.county_name} residents. No insurance or ID required.`,
+    targetSdoh: loc.food_insecurity > 18 ? 'Food Access & Health Screening' : (loc.poverty_rate > 15 ? 'Comprehensive SDOH Navigation' : 'Preventative Health & Vitals'),
+    description: `Urgent mobile community health truck active in ${cityName}, ${loc.county_name}. Providing walk-up vitals checks, diabetes/hypertension screenings, free fresh produce vouchers, and direct navigation to social safety net resources.`,
+    services: [
+      'Blood pressure check',
+      'Glucose screening',
+      'SDOH Navigation',
+      loc.food_insecurity > 12 ? 'Produce prescription vouchers' : 'Preventative primary care referral',
+      'SNAP signup assistance'
+    ],
+    priority: isHighRisk ? 'Critical Priority' : 'High Priority',
+    distance: '1.2 mi'
+  }
+})
+
+watch(activeLocationRecord, (newLoc) => {
+  if (newLoc && newLoc.county_name) {
+    outreachData.value.campaignName = `${newLoc.county_name} Community Health & SDOH Outreach`
+  }
+}, { immediate: true })
 
 // Mock Interventions Data by county
 const interventionsByCounty = {
@@ -481,7 +531,111 @@ const activeCountyData = computed(() => {
       list: list
     }
   }
-  const base = interventionsByCounty[selectedCounty.value]
+  const loc = activeLocationRecord.value
+  const cityName = loc.county_name.replace(/\s+County$/i, '').trim() || loc.county_name
+  const base = interventionsByCounty[selectedCounty.value] || {
+    recommended: 36,
+    highPriority: 12,
+    impactedPop: loc.population ? `${Math.round(loc.population * 0.4 / 1000)}K` : '420K',
+    expectedReached: loc.population ? `${Math.round(loc.population * 0.18 / 1000)}K` : '190K',
+    potentialImpact: '22.4%',
+    impactMembersReached: '95K',
+    impactRiskReduction: '19.8%',
+    impactVisitsAvoided: '6,240',
+    impactCostSavings: '$3.8M',
+    list: [
+      {
+        id: `${loc.fips}-1`,
+        title: `${cityName} Produce Prescription & Food Assistance`,
+        domain: 'food',
+        domainLabel: 'Food Access',
+        description: `Direct food pantry delivery and produce prescription program across ${loc.county_name}.`,
+        drivers: ['Food Insecurity', 'Poverty'],
+        targetPop: '85K Members',
+        targetPopExact: '85,400 Members',
+        expectedImpact: '↓ 18.2% Health Risk',
+        priority: 'High',
+        status: 'Active',
+        whyIntervention: `${loc.county_name} demonstrates an elevated food insecurity rate of ${loc.food_insecurity}%.`,
+        keyDrivers: [
+          { name: 'Food Insecurity', val: Math.min(95, Math.round(loc.food_insecurity * 4)), color: 'red' },
+          { name: 'Poverty Burden', val: Math.min(95, Math.round(loc.poverty_rate * 3)), color: 'orange' }
+        ],
+        activities: [
+          'Coordinate recurring mobile produce distribution',
+          'Fast-track SNAP enrollment at local health clinics',
+          'Deploy nutrition education workshops'
+        ],
+        implementation: {
+          startDate: 'Immediate',
+          owner: 'Community Health Taskforce',
+          partners: 'Local Food Banks & Grocers',
+          budget: '$210,000',
+          duration: '12 months'
+        }
+      },
+      {
+        id: `${loc.fips}-2`,
+        title: `${cityName} Non-Emergency Medical Transportation Shuttle`,
+        domain: 'transit',
+        domainLabel: 'Transportation',
+        description: `Subsidized door-to-door transit to overcome medical appointment cancellation rates in ${loc.county_name}.`,
+        drivers: ['Transit Barriers', 'Healthcare Access'],
+        targetPop: '62K Members',
+        targetPopExact: '62,100 Members',
+        expectedImpact: '↓ 14.5% Preventable Visits',
+        priority: 'High',
+        status: 'Planned',
+        whyIntervention: `Transportation barrier rate in ${loc.county_name} is ${loc.transportation_barrier}%.`,
+        keyDrivers: [
+          { name: 'Transit Impediments', val: Math.min(95, Math.round(loc.transportation_barrier * 4.5)), color: 'red' },
+          { name: 'No Vehicle Access', val: Math.min(95, Math.round(loc.no_vehicle_rate * 5)), color: 'orange' }
+        ],
+        activities: [
+          'Distribute rideshare vouchers for clinic visits',
+          'Establish clinic-to-hub express shuttle corridors',
+          'Coordinate wheelchair-accessible van mobility'
+        ],
+        implementation: {
+          startDate: 'Next Month',
+          owner: 'Mobility Coordination Alliance',
+          partners: 'Transit Authorities',
+          budget: '$165,000',
+          duration: '6 months'
+        }
+      },
+      {
+        id: `${loc.fips}-3`,
+        title: `${cityName} Community Health Worker (CHW) Chronic Care Hub`,
+        domain: 'health',
+        domainLabel: 'Healthcare Access',
+        description: `Home visitations and vitals tracking for hypertensive and diabetic patients across ${loc.county_name}.`,
+        drivers: ['Diabetes', 'Hypertension', 'Lack of Primary Care'],
+        targetPop: '78K Members',
+        targetPopExact: '78,250 Members',
+        expectedImpact: '↓ 21.0% Hospital Readmissions',
+        priority: 'High',
+        status: 'Active',
+        whyIntervention: `High BP prevalence is ${loc.high_bp_prevalence}% and diabetes prevalence is ${loc.diabetes_prevalence}% in ${loc.county_name}.`,
+        keyDrivers: [
+          { name: 'Hypertension Rate', val: Math.min(95, Math.round(loc.high_bp_prevalence * 1.8)), color: 'red' },
+          { name: 'Diabetes Prevalence', val: Math.min(95, Math.round(loc.diabetes_prevalence * 3)), color: 'orange' }
+        ],
+        activities: [
+          'Deploy bilingual CHW navigators to high-SVI neighborhoods',
+          'Distribute home blood pressure monitors and glucose strips',
+          'Conduct monthly medication adherence check-ins'
+        ],
+        implementation: {
+          startDate: 'Active',
+          owner: 'Regional Health Coalition',
+          partners: 'FQHCs & Area Hospitals',
+          budget: '$290,000',
+          duration: '18 months'
+        }
+      }
+    ]
+  }
   return {
     ...base,
     recommendedTrend: '16.7%',
@@ -931,6 +1085,74 @@ function getDomainColor(domain) {
           </div>
 
         </section>
+
+        <!-- Active Location-Based Live Campaign Banner -->
+        <div class="location-campaign-card" style="background: linear-gradient(135deg, #eff6ff 0%, #f0fdf4 100%); border: 1.5px solid #bfdbfe; border-radius: 12px; padding: 18px; margin-bottom: 22px; box-shadow: 0 4px 14px rgba(37, 99, 235, 0.08);">
+          <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px;">
+            <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+              <span style="background: #dbeafe; color: #1e40af; font-size: 0.72rem; font-weight: 800; letter-spacing: 0.05em; padding: 3px 10px; border-radius: 6px; text-transform: uppercase; border: 1px solid #bfdbfe; display: inline-flex; align-items: center; gap: 4px;">
+                <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                {{ activeCountyCampaign.badge }}
+              </span>
+              <span style="background: #dcfce7; color: #166534; font-size: 0.72rem; font-weight: 700; padding: 3px 8px; border-radius: 6px; display: inline-flex; align-items: center; gap: 4px;">
+                <span style="width: 6px; height: 6px; border-radius: 50%; background: #16a34a; display: inline-block;"></span>
+                {{ activeCountyCampaign.status }}
+              </span>
+              <span style="font-size: 0.78rem; color: #475569; font-weight: 700;">
+                📍 {{ activeCountyCampaign.fullLocation }}
+              </span>
+            </div>
+            <span style="font-size: 0.75rem; font-weight: 700; color: #2563eb; background: #ffffff; padding: 2px 8px; border-radius: 12px; border: 1px solid #dbeafe;">
+              {{ activeCountyCampaign.distance }} away
+            </span>
+          </div>
+
+          <h3 style="margin: 0 0 6px 0; font-size: 1.15rem; font-weight: 800; color: #0f172a; display: flex; align-items: center; gap: 8px;">
+            <span>{{ activeCountyCampaign.name }}</span>
+          </h3>
+
+          <div style="display: flex; gap: 16px; font-size: 0.82rem; color: #475569; margin-bottom: 10px; flex-wrap: wrap;">
+            <span style="display: flex; align-items: center; gap: 4px;">
+              📍 <strong>{{ activeCountyCampaign.locationName }}</strong>
+            </span>
+            <span style="display: flex; align-items: center; gap: 4px;">
+              📅 <strong>{{ activeCountyCampaign.hours }}</strong>
+            </span>
+            <span style="display: flex; align-items: center; gap: 4px;">
+              👥 {{ activeCountyCampaign.eligibility }}
+            </span>
+          </div>
+
+          <p style="margin: 0 0 12px 0; font-size: 0.84rem; color: #334155; line-height: 1.45;">
+            {{ activeCountyCampaign.description }}
+          </p>
+
+          <!-- Service Tags -->
+          <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px;">
+            <span v-for="srv in activeCountyCampaign.services" :key="srv" style="background: #ffffff; color: #1e293b; border: 1px solid #cbd5e1; padding: 3px 9px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">
+              {{ srv }}
+            </span>
+          </div>
+
+          <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap; border-top: 1px solid #dbeafe; padding-top: 12px;">
+            <button 
+              @click="router.push('/community-resources')" 
+              style="background: #2563eb; color: #ffffff; border: none; padding: 8px 16px; border-radius: 6px; font-weight: 700; font-size: 0.82rem; cursor: pointer; display: flex; align-items: center; gap: 6px; box-shadow: 0 2px 6px rgba(37,99,235,0.25);"
+            >
+              <span>Directions on CareMap</span>
+              <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg>
+            </button>
+            <button 
+              @click="router.push('/community-resources')"
+              style="background: #ffffff; color: #2563eb; border: 1.5px solid #bfdbfe; padding: 7px 14px; border-radius: 6px; font-weight: 700; font-size: 0.82rem; cursor: pointer; display: flex; align-items: center; gap: 4px;"
+            >
+              View Resource Details ↗
+            </button>
+            <span style="font-size: 0.78rem; color: #475569; margin-left: auto;">
+              📞 Hotline: <b>{{ activeCountyCampaign.phone }}</b>
+            </span>
+          </div>
+        </div>
 
         <!-- Recommended Interventions Table -->
         <section class="recommended-interventions-section card">

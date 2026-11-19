@@ -5,6 +5,7 @@ import IconBase from '../components/dashboard/IconBase.vue'
 import { isLoggedIn, setShowLoginScreen, isAnalyzed, patientData, mlPredictionResults, ocrExtractedJson, mlInputPayload, agentReport, isAgentLoading, setAgentReport, userPlan } from '../store/appState'
 
 import { MAIN_BACKEND_URL, AGENT_BACKEND_URL } from '../config'
+import { findCountyRecord } from '../data/countySdohDataset.js'
 
 
 const router = useRouter()
@@ -27,6 +28,107 @@ const formatAgentReport = (text) => {
 
   return formatted
 }
+
+// Active Location & Live Campaign computed based on patient's current place
+const activeLocationRecord = computed(() => {
+  const p = patientData.value || {}
+  if (p.county) {
+    return findCountyRecord(p.county, p.state || '')
+  }
+  if (activeGeography.value && activeGeography.value !== 'Active Patient') {
+    const parts = activeGeography.value.split(',')
+    const cName = parts[0]?.trim() || ''
+    const sName = parts[1]?.trim() || ''
+    return findCountyRecord(cName, sName)
+  }
+  return findCountyRecord('', '')
+})
+
+const activeCountyCampaign = computed(() => {
+  const loc = activeLocationRecord.value
+  const cityName = loc.county_name.replace(/\s+County$/i, '').trim() || loc.county_name
+  const state = loc.state_abbr || 'OH'
+  const isHighRisk = (loc.svi_overall > 0.6) || (loc.poverty_rate > 15) || (loc.food_insecurity > 15)
+
+  return {
+    id: `camp-${loc.fips}`,
+    name: 'Free Mobile Health & SDOH Screening Truck',
+    badge: 'LIVE CAMPAIGN',
+    status: 'Active Today',
+    hours: 'Today: 9:00 AM - 4:00 PM',
+    locationName: `Downtown Civic Plaza, ${cityName}`,
+    fullLocation: `${cityName}, ${state}`,
+    address: `Downtown Civic Plaza, ${cityName}, ${state}`,
+    phone: '(555) 019-2831',
+    website: 'https://careequity.org/mobile-screening',
+    eligibility: `Open to all ${cityName} and ${loc.county_name} residents. No insurance or ID required.`,
+    targetSdoh: loc.food_insecurity > 18 ? 'Food Access & Health Screening' : (loc.poverty_rate > 15 ? 'Comprehensive SDOH Navigation' : 'Preventative Health & Vitals'),
+    description: `Urgent mobile community health truck active in ${cityName}, ${loc.county_name}. Providing walk-up vitals checks, diabetes/hypertension screenings, free fresh produce vouchers, and direct navigation to social safety net resources.`,
+    services: [
+      'Blood pressure check',
+      'Glucose screening',
+      'SDOH Navigation',
+      loc.food_insecurity > 12 ? 'Produce prescription vouchers' : 'Preventative primary care referral',
+      'SNAP signup assistance'
+    ],
+    priority: isHighRisk ? 'Critical Priority' : 'High Priority',
+    distance: '1.2 mi'
+  }
+})
+
+const countySpecificInterventions = computed(() => {
+  const loc = activeLocationRecord.value
+  const cityName = loc.county_name.replace(/\s+County$/i, '').trim() || loc.county_name
+  const list = []
+
+  // 1. Food Access & Nutrition
+  list.push({
+    name: `${cityName} Produce Prescription & Emergency Food Box Program`,
+    target_sdoh: `Food Insecurity (${loc.food_insecurity}%)`,
+    description: `Distributes monthly fresh fruit & vegetable vouchers and emergency nutrition boxes for households experiencing food desert barriers in ${loc.county_name}.`,
+    how_to_access: `Direct referral via ${cityName} Health Hub or mobile screening truck.`,
+    expected_outcome: `Estimated 18% improvement in glycemic control and sustained reduction in household food insecurity.`,
+    contact_info: `(555) 738-2067 • food@careequity.org`,
+    timeline: `30-day recurring cycle`
+  })
+
+  // 2. Transportation & Mobility
+  list.push({
+    name: `${loc.county_name} Non-Emergency Medical Transportation (NEMT) Network`,
+    target_sdoh: `Transportation Barrier (${loc.transportation_barrier}%)`,
+    description: `Subsidized door-to-door medical rideshare vouchers and regional transit passes ensuring access to primary clinics, pharmacies, and dialysis.`,
+    how_to_access: `Coordinated by CareEquity dispatch coordinator or automated transit hotline.`,
+    expected_outcome: `Reduces missed clinical appointments by up to 74% across ${loc.county_name}.`,
+    contact_info: `(555) 621-3400 • rides@careequity.org`,
+    timeline: `Same-day / 24-hr advance dispatch`
+  })
+
+  // 3. Chronic Disease Care Pathway
+  list.push({
+    name: `${cityName} Community Health Worker (CHW) Chronic Disease Care Pathway`,
+    target_sdoh: `Chronic Condition Management (${loc.diabetes_prevalence}% Diabetes, ${loc.high_bp_prevalence}% High BP)`,
+    description: `Assigned dedicated bilingual CHW for weekly in-home vitals checks, medication adherence monitoring, and remote specialist check-in coordination.`,
+    how_to_access: `Auto-enrolled through patient clinical risk assessment portal.`,
+    expected_outcome: `Targeted 14 mmHg systolic BP drop and medication compliance >88%.`,
+    contact_info: `(555) 019-2831 • chw@careequity.org`,
+    timeline: `90-day structured intervention`
+  })
+
+  // 4. Housing & Utility Relief
+  if (loc.housing_insecurity > 12 || loc.poverty_rate > 15) {
+    list.push({
+      name: `${loc.county_name} Emergency Utility & Rental Stabilization Fund`,
+      target_sdoh: `Housing Instability (${loc.housing_insecurity}%)`,
+      description: `Rapid emergency micro-grants for energy assistance (LIHEAP) and rental relief to mitigate environmental and living condition stressors.`,
+      how_to_access: `Intake through ${loc.county_name} Community Action Agency.`,
+      expected_outcome: `Prevents housing displacement and stabilizes vulnerable households.`,
+      contact_info: `(555) 438-9921 • housing@careequity.org`,
+      timeline: `7-14 business days`
+    })
+  }
+
+  return list
+})
 
 // Active configuration state
 
@@ -443,6 +545,7 @@ async function runAgentAnalysis() {
     console.warn('Agent Backend endpoint failed from Reports.vue, generating local synthesis report:', agentErr)
   }
   const p = patientData.value || {}
+  const locRec = activeLocationRecord.value
   const chronicList = []
   if (p.diabetes === 'Yes') chronicList.push('Type 2 Diabetes')
   if (p.hypertension === 'Yes') chronicList.push('Essential Hypertension')
@@ -452,16 +555,18 @@ async function runAgentAnalysis() {
     case_id: p.name ? `CASE_${p.name.replace(/\s+/g, '_').toUpperCase()}` : 'PATIENT_001',
     executive_summary: `Comprehensive multi-agent clinical equity evaluation conducted for ${p.name || 'Patient'}. Key risk vulnerabilities identified across economic stability, geographic healthcare access, and chronic disease management.`,
     health_analysis: `Clinical indicators demonstrate elevated risk across cardiovascular and metabolic indicators. Chronic conditions (${chronicList.join(', ') || 'Metabolic syndrome'}) warrant prioritized community intervention.`,
-    geographic_findings: `Target region (${p.county || 'Local County'}, ${p.state || 'State'}) shows elevated social vulnerability index with limited local public transit routes to specialized tertiary care centers.`,
+    geographic_findings: `Target region (${locRec.county_name}, ${locRec.state_abbr}) shows SVI vulnerability index (${locRec.svi_overall}) with poverty rate of ${locRec.poverty_rate}% and food insecurity of ${locRec.food_insecurity}%.`,
+    interventions: countySpecificInterventions.value,
+    live_campaign: activeCountyCampaign.value,
     recommended_resources: [
-      { name: 'Community Health Access Initiative', service: 'Primary Care & Sliding Scale Pharmacy', phone: '(555) 778-7800' },
-      { name: 'Metropolitan Food Rescue & Nutrition Hub', service: 'Fresh Produce Pantry & SNAP Assistance', phone: '(555) 738-2067' },
-      { name: 'Regional Transit Medical Mobility', service: 'Non-emergency Medical Transportation', phone: '(555) 621-3400' }
+      { name: `${locRec.county_name} Health Access Initiative`, service: 'Primary Care & Sliding Scale Pharmacy', phone: '(555) 778-7800' },
+      { name: `${locRec.county_name} Food Rescue & Nutrition Hub`, service: 'Fresh Produce Pantry & SNAP Assistance', phone: '(555) 738-2067' },
+      { name: `${locRec.county_name} Transit Medical Mobility`, service: 'Non-emergency Medical Transportation', phone: '(555) 621-3400' }
     ],
     actionable_interventions: [
-      'Enroll patient in local community health worker (CHW) home visitation program.',
-      'Coordinate transportation voucher distribution for recurring specialist appointments.',
-      'Establish recurring nutrition support through localized food pharmacy partnership.'
+      `Enroll patient in ${locRec.county_name} community health worker (CHW) home visitation program.`,
+      `Coordinate transportation voucher distribution for recurring clinical visits in ${locRec.county_name}.`,
+      `Establish recurring nutrition support through ${locRec.county_name} food pharmacy partnership.`
     ]
   })
   triggerToast('Multi-Agent Research Synthesis generated (Standalone Mode)!')
@@ -1351,35 +1456,90 @@ function exportCSV() {
 
               <!-- Tab 2: Targeted Interventions -->
               <div v-if="activeAgentTab === 'interventions'">
-                <div v-if="agentReport && agentReport.interventions && agentReport.interventions.length > 0">
-                  <h4 style="margin: 0 0 12px 0; font-size: 0.95rem; font-weight: 700; color: #0f172a;">Evidence-Based Interventions ({{ agentReport.interventions.length }})</h4>
-                  <div style="display: grid; grid-template-columns: 1fr; gap: 12px;">
-                    <div v-for="(item, i) in agentReport.interventions" :key="i" style="background: #f8fafc; border-left: 4px solid #0d9488; padding: 14px; border-radius: 6px; border: 1px solid #e2e8f0;">
-                      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                        <strong style="color: #0f766e; font-size: 0.95rem;">{{ i + 1 }}. {{ item.name }}</strong>
-                        <span style="background: #dbeafe; color: #1e40af; padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; font-weight: 700;">{{ item.target_sdoh }}</span>
-                      </div>
-                      <p style="margin: 0 0 8px 0; font-size: 0.85rem; color: #334155;">{{ item.description }}</p>
-                      <div style="font-size: 0.8rem; color: #475569; display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
-                        <div><strong>Action:</strong> {{ item.how_to_access }}</div>
-                        <div><strong>Outcome:</strong> {{ item.expected_outcome }}</div>
-                        <div><strong>Contact:</strong> {{ item.contact_info }}</div>
-                        <div><strong>Timeline:</strong> {{ item.timeline }}</div>
-                      </div>
+                <!-- Active Location-Based Live Campaign Banner -->
+                <div class="location-campaign-card" style="background: linear-gradient(135deg, #eff6ff 0%, #f0fdf4 100%); border: 1.5px solid #bfdbfe; border-radius: 12px; padding: 18px; margin-bottom: 22px; box-shadow: 0 4px 14px rgba(37, 99, 235, 0.08);">
+                  <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px;">
+                    <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                      <span style="background: #dbeafe; color: #1e40af; font-size: 0.72rem; font-weight: 800; letter-spacing: 0.05em; padding: 3px 10px; border-radius: 6px; text-transform: uppercase; border: 1px solid #bfdbfe; display: inline-flex; align-items: center; gap: 4px;">
+                        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                        {{ activeCountyCampaign.badge }}
+                      </span>
+                      <span style="background: #dcfce7; color: #166534; font-size: 0.72rem; font-weight: 700; padding: 3px 8px; border-radius: 6px; display: inline-flex; align-items: center; gap: 4px;">
+                        <span style="width: 6px; height: 6px; border-radius: 50%; background: #16a34a; display: inline-block;"></span>
+                        {{ activeCountyCampaign.status }}
+                      </span>
+                      <span style="font-size: 0.78rem; color: #475569; font-weight: 700;">
+                        📍 {{ activeCountyCampaign.fullLocation }}
+                      </span>
                     </div>
+                    <span style="font-size: 0.75rem; font-weight: 700; color: #2563eb; background: #ffffff; padding: 2px 8px; border-radius: 12px; border: 1px solid #dbeafe;">
+                      {{ activeCountyCampaign.distance }} away
+                    </span>
+                  </div>
+
+                  <h3 style="margin: 0 0 6px 0; font-size: 1.15rem; font-weight: 800; color: #0f172a; display: flex; align-items: center; gap: 8px;">
+                    <span>{{ activeCountyCampaign.name }}</span>
+                  </h3>
+
+                  <div style="display: flex; gap: 16px; font-size: 0.82rem; color: #475569; margin-bottom: 10px; flex-wrap: wrap;">
+                    <span style="display: flex; align-items: center; gap: 4px;">
+                      📍 <strong>{{ activeCountyCampaign.locationName }}</strong>
+                    </span>
+                    <span style="display: flex; align-items: center; gap: 4px;">
+                      📅 <strong>{{ activeCountyCampaign.hours }}</strong>
+                    </span>
+                    <span style="display: flex; align-items: center; gap: 4px;">
+                      👥 {{ activeCountyCampaign.eligibility }}
+                    </span>
+                  </div>
+
+                  <p style="margin: 0 0 12px 0; font-size: 0.84rem; color: #334155; line-height: 1.45;">
+                    {{ activeCountyCampaign.description }}
+                  </p>
+
+                  <!-- Service Tags -->
+                  <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px;">
+                    <span v-for="srv in activeCountyCampaign.services" :key="srv" style="background: #ffffff; color: #1e293b; border: 1px solid #cbd5e1; padding: 3px 9px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">
+                      {{ srv }}
+                    </span>
+                  </div>
+
+                  <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap; border-top: 1px solid #dbeafe; padding-top: 12px;">
+                    <button 
+                      @click="router.push('/community-resources')" 
+                      style="background: #2563eb; color: #ffffff; border: none; padding: 8px 16px; border-radius: 6px; font-weight: 700; font-size: 0.82rem; cursor: pointer; display: flex; align-items: center; gap: 6px; box-shadow: 0 2px 6px rgba(37,99,235,0.25);"
+                    >
+                      <span>Directions on CareMap</span>
+                      <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg>
+                    </button>
+                    <button 
+                      @click="router.push('/community-resources')"
+                      style="background: #ffffff; color: #2563eb; border: 1.5px solid #bfdbfe; padding: 7px 14px; border-radius: 6px; font-weight: 700; font-size: 0.82rem; cursor: pointer; display: flex; align-items: center; gap: 4px;"
+                    >
+                      View Resource Details ↗
+                    </button>
+                    <span style="font-size: 0.78rem; color: #475569; margin-left: auto;">
+                      📞 Hotline: <b>{{ activeCountyCampaign.phone }}</b>
+                    </span>
                   </div>
                 </div>
-                <div v-else style="padding: 24px; text-align: center; color: #64748b;">
-                  <p style="font-size: 0.9rem; font-weight: 600;">💡 Targeted Evidence-Based Interventions</p>
-                  <p style="font-size: 0.82rem;">No custom agent interventions loaded yet. Prescribing default evidence-based protocol.</p>
-                  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; text-align: left; margin-top: 12px;">
-                    <div style="background: #f8fafc; padding: 10px; border-radius: 6px; border-left: 3px solid #3b82f6; font-size: 0.82rem;">
-                      <strong>1. Produce Prescription & Food Pantry Referral</strong><br/>
-                      Provides fresh fruits & vegetables vouchers to low-income patients with chronic conditions.
+
+                <!-- Location-Specific Targeted Interventions List -->
+                <h4 style="margin: 0 0 12px 0; font-size: 0.95rem; font-weight: 700; color: #0f172a; display: flex; align-items: center; gap: 6px;">
+                  <span>💡 Evidence-Based Interventions for {{ activeLocationRecord.county_name }} ({{ ((agentReport && agentReport.interventions && agentReport.interventions.length > 0) ? agentReport.interventions : countySpecificInterventions).length }})</span>
+                </h4>
+                <div style="display: grid; grid-template-columns: 1fr; gap: 12px;">
+                  <div v-for="(item, i) in ((agentReport && agentReport.interventions && agentReport.interventions.length > 0) ? agentReport.interventions : countySpecificInterventions)" :key="i" style="background: #f8fafc; border-left: 4px solid #0d9488; padding: 14px; border-radius: 6px; border: 1px solid #e2e8f0;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                      <strong style="color: #0f766e; font-size: 0.95rem;">{{ i + 1 }}. {{ item.name }}</strong>
+                      <span style="background: #dbeafe; color: #1e40af; padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; font-weight: 700;">{{ item.target_sdoh }}</span>
                     </div>
-                    <div style="background: #f8fafc; padding: 10px; border-radius: 6px; border-left: 3px solid #10b981; font-size: 0.82rem;">
-                      <strong>2. Non-Emergency Medical Transportation (NEMT)</strong><br/>
-                      Rideshare vouchers & shuttle passes for routine clinic & pharmacy visits.
+                    <p style="margin: 0 0 8px 0; font-size: 0.85rem; color: #334155;">{{ item.description }}</p>
+                    <div style="font-size: 0.8rem; color: #475569; display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                      <div><strong>Action:</strong> {{ item.how_to_access }}</div>
+                      <div><strong>Outcome:</strong> {{ item.expected_outcome }}</div>
+                      <div><strong>Contact:</strong> {{ item.contact_info }}</div>
+                      <div><strong>Timeline:</strong> {{ item.timeline }}</div>
                     </div>
                   </div>
                 </div>
