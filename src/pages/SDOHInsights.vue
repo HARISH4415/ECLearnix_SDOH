@@ -4,6 +4,7 @@ import { Network } from 'vis-network/standalone'
 import { KG_BACKEND_URL } from '../config'
 import { patientData } from '../store/appState'
 import { US_COUNTY_COORDINATES } from '../data/usData.js'
+import { SDOH_COUNTIES_BY_FIPS, findCountyRecord } from '../data/countySdohDataset.js'
 
 const API_BASE = KG_BACKEND_URL
 
@@ -88,213 +89,26 @@ const handleClickOutside = (e) => {
   }
 }
 
-// Base reference catalog of US Counties
-const BASE_COUNTIES_LIST = [
-  { fips: '39035', county_name: 'Cuyahoga County', state_abbr: 'OH', display_label: 'Cuyahoga County, OH (39035)' },
-  { fips: '37029', county_name: 'Camden County', state_abbr: 'NC', display_label: 'Camden County, NC (37029)' },
-  { fips: '47149', county_name: 'Rutherford County', state_abbr: 'TN', display_label: 'Rutherford County, TN (47149)' },
-  { fips: '26163', county_name: 'Wayne County', state_abbr: 'MI', display_label: 'Wayne County, MI (26163)' },
-  { fips: '18097', county_name: 'Marion County', state_abbr: 'IN', display_label: 'Marion County, IN (18097)' },
-  { fips: '39049', county_name: 'Franklin County', state_abbr: 'OH', display_label: 'Franklin County, OH (39049)' },
-  { fips: '17031', county_name: 'Cook County', state_abbr: 'IL', display_label: 'Cook County, IL (17031)' },
-  { fips: '6037',  county_name: 'Los Angeles County', state_abbr: 'CA', display_label: 'Los Angeles County, CA (06037)' },
-  { fips: '48201', county_name: 'Harris County', state_abbr: 'TX', display_label: 'Harris County, TX (48201)' },
-  { fips: '12086', county_name: 'Miami-Dade County', state_abbr: 'FL', display_label: 'Miami-Dade County, FL (12086)' },
-  { fips: '13121', county_name: 'Fulton County', state_abbr: 'GA', display_label: 'Fulton County, GA (13121)' },
-  { fips: '1001',  county_name: 'Autauga County', state_abbr: 'AL', display_label: 'Autauga County, AL (01001)' }
-]
-
-const statePrefixMap = {
-  'AL': '01', 'GA': '13', 'IN': '18', 'MI': '26', 'MS': '28', 'NC': '37', 'OH': '39', 'TN': '47', 'IL': '17', 'CA': '06', 'TX': '48', 'FL': '12'
-}
-
-const MOCK_COUNTIES_LIST = [...BASE_COUNTIES_LIST]
-if (typeof US_COUNTY_COORDINATES === 'object') {
-  Object.entries(US_COUNTY_COORDINATES).forEach(([fullName, info], idx) => {
-    const parts = fullName.split(', ')
-    const cName = parts[0]
-    const sName = parts[1] || ''
-    const sAbbr = info.stateAbbr || sName.slice(0, 2).toUpperCase()
-    const pfx = statePrefixMap[sAbbr] || '99'
-    const genFips = `${pfx}${String(100 + (idx * 2)).padStart(3, '0')}`
-
-    if (!MOCK_COUNTIES_LIST.some(m => m.county_name.toLowerCase() === cName.toLowerCase() && m.state_abbr === sAbbr)) {
-      MOCK_COUNTIES_LIST.push({
-        fips: genFips,
-        county_name: cName,
-        state_abbr: sAbbr,
-        display_label: `${cName}, ${sAbbr} (${genFips})`
-      })
-    }
-  })
-}
-
-// Known county demographics database
-const COUNTY_DEMOGRAPHICS = {
-  '39035': { pop: 1264817, inc: 56340, svi: 0.7420, name: 'Cuyahoga County', state: 'OH' },
-  '37029': { pop: 10762,   inc: 72480, svi: 0.2840, name: 'Camden County', state: 'NC' },
-  '47149': { pop: 341486,  inc: 74218, svi: 0.3910, name: 'Rutherford County', state: 'TN' },
-  '26163': { pop: 1793561, inc: 49458, svi: 0.8140, name: 'Wayne County', state: 'MI' },
-  '18097': { pop: 977203,  inc: 54128, svi: 0.6820, name: 'Marion County', state: 'IN' },
-  '17031': { pop: 5275541, inc: 72352, svi: 0.6540, name: 'Cook County', state: 'IL' },
-  '39049': { pop: 1326093, inc: 66914, svi: 0.5310, name: 'Franklin County', state: 'OH' },
-  '6037':  { pop: 10014009,inc: 76367, svi: 0.7320, name: 'Los Angeles County', state: 'CA' },
-  '48201': { pop: 4731145, inc: 65112, svi: 0.7580, name: 'Harris County', state: 'TX' },
-  '12086': { pop: 2701767, inc: 57815, svi: 0.8120, name: 'Miami-Dade County', state: 'FL' },
-  '13121': { pop: 1066710, inc: 75940, svi: 0.5280, name: 'Fulton County', state: 'GA' },
-  '1001':  { pop: 58761,   inc: 68315, svi: 0.2663, name: 'Autauga County', state: 'AL' }
-}
-
 function getCountyOverview(fips, countyItem) {
-  const fipsStr = String(fips)
-  if (COUNTY_DEMOGRAPHICS[fipsStr]) {
-    const d = COUNTY_DEMOGRAPHICS[fipsStr]
-    return {
-      county_name: countyItem.county_name || d.name,
-      state_abbr: countyItem.state_abbr || d.state,
-      population: d.pop,
-      median_household_income: d.inc,
-      svi_overall: d.svi
-    }
-  }
-
-  const fipsNum = parseInt(fips, 10) || 1001
-  const seed = (fipsNum % 100) / 100
+  const rec = findCountyRecord(countyItem?.county_name, countyItem?.state_abbr, fips)
   return {
-    county_name: countyItem.county_name || 'Selected County',
-    state_abbr: countyItem.state_abbr || 'US',
-    population: Math.round(35000 + seed * 850000),
-    median_household_income: Math.round(48000 + seed * 34000),
-    svi_overall: parseFloat((0.25 + seed * 0.55).toFixed(4))
+    county_name: rec.county_name,
+    state_abbr: rec.state_abbr,
+    population: rec.population,
+    median_household_income: rec.median_household_income,
+    svi_overall: rec.svi_overall,
+    sdoh_band: rec.sdoh_band
   }
 }
 
 function getCountySdohData(fips, countyName) {
-  const fipsNum = parseInt(fips, 10) || 1001
-  const seed = (fipsNum % 100) / 100
-
-  const povertyRate = parseFloat((11.5 + (seed * 11.0) - 2.5).toFixed(1))
-  const foodDesert = parseFloat((12.8 + (seed * 14.0) - 3.2).toFixed(1))
-  const uninsured = parseFloat((7.9 + (seed * 7.5) - 1.8).toFixed(1))
-  const noVehicle = parseFloat((8.5 + (seed * 9.0) - 2.0).toFixed(1))
-  const housingBurden = parseFloat((12.1 + (seed * 8.5) - 1.5).toFixed(1))
-
-  return [
-    {
-      factor_name: 'Poverty Rate',
-      county_value: povertyRate,
-      us_avg: 11.5,
-      difference: parseFloat((povertyRate - 11.5).toFixed(1)),
-      unit: '%',
-      category: 'Economic Stability',
-      metric: 'Poverty Rate',
-      value: `${povertyRate}%`,
-      risk_level: povertyRate > 14 ? 'High' : 'Moderate'
-    },
-    {
-      factor_name: 'Food Desert Population',
-      county_value: foodDesert,
-      us_avg: 12.8,
-      difference: parseFloat((foodDesert - 12.8).toFixed(1)),
-      unit: '%',
-      category: 'Food Access',
-      metric: 'Food Desert Population',
-      value: `${foodDesert}%`,
-      risk_level: foodDesert > 15 ? 'High' : 'Moderate'
-    },
-    {
-      factor_name: 'Uninsured Population',
-      county_value: uninsured,
-      us_avg: 7.9,
-      difference: parseFloat((uninsured - 7.9).toFixed(1)),
-      unit: '%',
-      category: 'Healthcare Access',
-      metric: 'Uninsured Population',
-      value: `${uninsured}%`,
-      risk_level: uninsured > 9 ? 'High' : 'Low'
-    },
-    {
-      factor_name: 'Households without Vehicle',
-      county_value: noVehicle,
-      us_avg: 8.5,
-      difference: parseFloat((noVehicle - 8.5).toFixed(1)),
-      unit: '%',
-      category: 'Transportation',
-      metric: 'Households without Vehicle',
-      value: `${noVehicle}%`,
-      risk_level: noVehicle > 10 ? 'High' : 'Moderate'
-    },
-    {
-      factor_name: 'Severe Housing Cost Burden',
-      county_value: housingBurden,
-      us_avg: 12.1,
-      difference: parseFloat((housingBurden - 12.1).toFixed(1)),
-      unit: '%',
-      category: 'Neighborhood & Housing',
-      metric: 'Severe Housing Cost Burden',
-      value: `${housingBurden}%`,
-      risk_level: housingBurden > 14 ? 'High' : 'Moderate'
-    }
-  ]
+  const rec = findCountyRecord(countyName, '', fips)
+  return rec.sdohTable
 }
 
 function getCountyHealthOutcomes(fips, countyName) {
-  const fipsNum = parseInt(fips, 10) || 1001
-  const seed = (fipsNum % 100) / 100
-
-  const diabetes = parseFloat((9.8 + (seed * 6.0) - 1.2).toFixed(1))
-  const hypertension = parseFloat((29.7 + (seed * 10.5) - 2.5).toFixed(1))
-  const heartDisease = parseFloat((5.9 + (seed * 3.2) - 0.7).toFixed(1))
-  const asthma = parseFloat((8.9 + (seed * 3.8) - 0.9).toFixed(1))
-  const mentalDistress = parseFloat((13.2 + (seed * 5.0) - 1.5).toFixed(1))
-
-  return [
-    {
-      condition_name: 'Diabetes Prevalence',
-      county_prevalence: diabetes,
-      us_avg: 9.8,
-      difference: parseFloat((diabetes - 9.8).toFixed(1)),
-      condition: 'Diabetes Prevalence',
-      rate: `${diabetes}%`,
-      national_avg: '9.8%'
-    },
-    {
-      condition_name: 'Hypertension (High BP)',
-      county_prevalence: hypertension,
-      us_avg: 29.7,
-      difference: parseFloat((hypertension - 29.7).toFixed(1)),
-      condition: 'Hypertension',
-      rate: `${hypertension}%`,
-      national_avg: '29.7%'
-    },
-    {
-      condition_name: 'Coronary Heart Disease',
-      county_prevalence: heartDisease,
-      us_avg: 5.9,
-      difference: parseFloat((heartDisease - 5.9).toFixed(1)),
-      condition: 'Coronary Heart Disease',
-      rate: `${heartDisease}%`,
-      national_avg: '5.9%'
-    },
-    {
-      condition_name: 'Adult Asthma',
-      county_prevalence: asthma,
-      us_avg: 8.9,
-      difference: parseFloat((asthma - 8.9).toFixed(1)),
-      condition: 'Adult Asthma',
-      rate: `${asthma}%`,
-      national_avg: '8.9%'
-    },
-    {
-      condition_name: 'Frequent Mental Distress',
-      county_prevalence: mentalDistress,
-      us_avg: 13.2,
-      difference: parseFloat((mentalDistress - 13.2).toFixed(1)),
-      condition: 'Frequent Mental Distress',
-      rate: `${mentalDistress}%`,
-      national_avg: '13.2%'
-    }
-  ]
+  const rec = findCountyRecord(countyName, '', fips)
+  return rec.healthTable
 }
 
 function normalizeSdohData(data, fips, countyName) {
@@ -358,30 +172,35 @@ function formatDiffPercent(diff) {
 }
 
 function getMockCountyGraph(fips, countyName, stateAbbr) {
-  const cId = `county_${fips}`
-  const sId = `state_${stateAbbr}`
+  const rec = findCountyRecord(countyName, stateAbbr, fips)
+  const cId = `county_${rec.fips}`
+  const sId = `state_${rec.state_abbr}`
   return {
     nodes: [
-      { id: cId, label: countyName, type: 'County', color: '#6366f1', size: 42, title: `<b>${countyName}</b><br>FIPS: ${fips}<br>High SDoH Vulnerability` },
-      { id: sId, label: `State: ${stateAbbr}`, type: 'State', color: '#3b82f6', size: 28, title: `State: ${stateAbbr}` },
-      { id: 'sdoh_food', label: 'Food Desert Index', type: 'Factor', color: '#ef4444', size: 24, title: 'Impact: High Food Insecurity' },
-      { id: 'sdoh_transit', label: 'Limited Transit Access', type: 'Factor', color: '#f59e0b', size: 24, title: 'Impact: Limited Non-emergency Transport' },
-      { id: 'sdoh_income', label: 'Poverty Rate (>18%)', type: 'Factor', color: '#ef4444', size: 26, title: 'Impact: Economic Hardship' },
-      { id: 'sdoh_housing', label: 'Severe Rent Burden', type: 'Factor', color: '#8b5cf6', size: 22, title: 'Impact: Housing Instability' },
-      { id: 'sdoh_insurance', label: 'Uninsured Rate', type: 'Factor', color: '#ec4899', size: 22, title: 'Impact: Delayed Preventative Care' }
+      { id: cId, label: rec.county_name, type: 'County', color: '#6366f1', size: 42, title: `<b>${rec.county_name}</b><br>FIPS: ${rec.fips}<br>SVI: ${rec.svi_overall} (${rec.sdoh_band})` },
+      { id: sId, label: `State: ${rec.state_abbr}`, type: 'State', color: '#3b82f6', size: 28, title: `State: ${rec.state_abbr}` },
+      { id: 'sdoh_food', label: `Food Insecurity (${rec.food_insecurity}%)`, type: 'Factor', color: rec.food_insecurity > 15 ? '#ef4444' : '#10b981', size: 24, title: `Impact: ${rec.food_insecurity}% population affected` },
+      { id: 'sdoh_transit', label: `Transit Barrier (${rec.transportation_barrier}%)`, type: 'Factor', color: rec.transportation_barrier > 9 ? '#f59e0b' : '#10b981', size: 24, title: `Impact: ${rec.transportation_barrier}% transit hardship` },
+      { id: 'sdoh_income', label: `Poverty Rate (${rec.poverty_rate}%)`, type: 'Factor', color: rec.poverty_rate > 15 ? '#ef4444' : '#10b981', size: 26, title: `Impact: ${rec.poverty_rate}% below poverty line` },
+      { id: 'sdoh_housing', label: `Severe Rent Burden (${rec.housing_insecurity}%)`, type: 'Factor', color: rec.housing_insecurity > 14 ? '#8b5cf6' : '#10b981', size: 22, title: `Impact: ${rec.housing_insecurity}% rent burdened` },
+      { id: 'sdoh_insurance', label: `Uninsured Rate (${rec.lack_health_insurance}%)`, type: 'Factor', color: rec.lack_health_insurance > 9 ? '#ec4899' : '#10b981', size: 22, title: `Impact: ${rec.lack_health_insurance}% lack coverage` },
+      { id: 'cond_diab', label: `Diabetes (${rec.diabetes_prevalence}%)`, type: 'Condition', color: '#3b82f6', size: 26, title: `Prevalence: ${rec.diabetes_prevalence}%` },
+      { id: 'cond_bp', label: `High BP (${rec.high_bp_prevalence}%)`, type: 'Condition', color: '#10b981', size: 28, title: `Prevalence: ${rec.high_bp_prevalence}%` }
     ],
     edges: [
       { from: cId, to: sId, label: 'IN_STATE', color: '#94a3b8', width: 2, dashes: true },
-      { from: cId, to: 'sdoh_food', label: 'ELEVATED_RISK', color: '#ef4444', width: 3 },
-      { from: cId, to: 'sdoh_transit', label: 'ELEVATED_RISK', color: '#f59e0b', width: 2 },
-      { from: cId, to: 'sdoh_income', label: 'CRITICAL_BARRIER', color: '#ef4444', width: 4 },
-      { from: cId, to: 'sdoh_housing', label: 'MODERATE_RISK', color: '#8b5cf6', width: 2 },
-      { from: cId, to: 'sdoh_insurance', label: 'HIGH_BARRIER', color: '#ec4899', width: 3 }
+      { from: cId, to: 'sdoh_food', label: 'FOOD_ACCESS', color: rec.food_insecurity > 15 ? '#ef4444' : '#10b981', width: 3 },
+      { from: cId, to: 'sdoh_transit', label: 'TRANSIT', color: '#f59e0b', width: 2 },
+      { from: cId, to: 'sdoh_income', label: 'ECONOMIC', color: rec.poverty_rate > 15 ? '#ef4444' : '#10b981', width: 4 },
+      { from: cId, to: 'sdoh_housing', label: 'HOUSING', color: '#8b5cf6', width: 2 },
+      { from: cId, to: 'sdoh_insurance', label: 'COVERAGE', color: '#ec4899', width: 3 },
+      { from: 'sdoh_food', to: 'cond_diab', label: 'EXACERBATES', color: '#f97316', width: 2, dashes: true },
+      { from: 'sdoh_income', to: 'cond_bp', label: 'CONTRIBUTES_TO', color: '#ef4444', width: 2, dashes: true }
     ]
   }
 }
 
-// Fetch list of counties for dropdown
+// Fetch list of counties for dropdown (uses complete dataset from synthetic_county_context_50_FINAL.csv & SDOH_MODEL_DATA.csv)
 const fetchCounties = async () => {
   try {
     const res = await fetch(`${API_BASE}/api/counties`)
@@ -390,18 +209,16 @@ const fetchCounties = async () => {
       return
     }
   } catch (err) {
-    console.warn('Backend API offline, using local counties catalog:', err)
+    console.warn('Backend API offline, using authoritative county dataset:', err)
   }
-  counties.value = MOCK_COUNTIES_LIST
+  counties.value = Object.values(SDOH_COUNTIES_BY_FIPS)
 }
 
 // Load county data
 const loadCountyData = async (fips) => {
   loading.value = true
   error.value = null
-  let countyItem = counties.value.find(c => String(c.fips) === String(fips)) || MOCK_COUNTIES_LIST.find(c => String(c.fips) === String(fips)) || {
-    fips, county_name: 'Cuyahoga County', state_abbr: 'OH'
-  }
+  let countyItem = counties.value.find(c => String(c.fips) === String(fips)) || findCountyRecord('', '', fips)
 
   try {
     // Overview

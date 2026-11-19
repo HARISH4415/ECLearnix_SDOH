@@ -6,6 +6,7 @@ import { patientData, setAnalyzed, setPatientData, setLocationRecords, isLoggedI
 import { MAIN_BACKEND_URL, SYSTEM_BACKEND_URL, PREDICTION_BACKEND_URL, OCR_BACKEND_URL, AGENT_BACKEND_URL } from '../config'
 
 import { US_STATES, US_COUNTIES_BY_STATE, getCountyCoords } from '../data/usData.js'
+import { findCountyRecord, calculateDynamicRisks } from '../data/countySdohDataset.js'
 import { extractDocumentText, parseClinicalText } from '../utils/documentExtractor.js'
 import {
   saveAssessmentToSupabase,
@@ -606,6 +607,10 @@ const buildAssessmentPayload = () => {
     loc.country || ''
   ])
 
+  // Look up genuine county dataset metrics
+  const countyRec = findCountyRecord(primaryLoc.county, primaryLoc.state)
+  const dynamicRisks = calculateDynamicRisks(form.value, countyRec)
+
   return {
     id: 'hist_' + Date.now(),
     user_email: cleanEmail,
@@ -626,33 +631,32 @@ const buildAssessmentPayload = () => {
     weight_kg: parseFloat(form.value.weight_kg) || 62.0,
     lat: pCoords.lat,
     long: pCoords.lon,
-    county: primaryLoc.county || 'Cuyahoga County',
-    state: primaryLoc.state || 'Ohio',
+    county: countyRec.county_name || primaryLoc.county || 'Cuyahoga County',
+    state: countyRec.state_name || primaryLoc.state || 'Ohio',
     country: primaryLoc.country || 'United States',
     notes: form.value.notes || '',
     is_favorite: false,
     extra_data: {
       lat: pCoords.lat,
       long: pCoords.lon,
-      county: primaryLoc.county,
-      state: primaryLoc.state,
+      county: countyRec.county_name,
+      state: countyRec.state_name || primaryLoc.state,
       country: primaryLoc.country,
       all_locations: form.value.locations,
       locations_list: locationsListOfLists,
       prediction_model: {
-        city: (primaryLoc.county || '').replace(/\s+County$/i, '').trim() || primaryLoc.county || 'Cleveland',
-        county: primaryLoc.county || 'Cuyahoga County',
-        state: primaryLoc.state || 'Ohio',
-        overall_risk_score: 0.63,
-        overall_risk_category: 'Medium',
-        scores: {
-          healthcare_access: 0.64,
-          social_context: 0.68,
-          food_security: 0.60,
-          neighborhood_environment: 0.55,
-          economic_stability: 0.58,
-          education_access: 0.70
-        }
+        city: countyRec.county_name,
+        county: countyRec.county_name,
+        state: countyRec.state_name || primaryLoc.state || 'Ohio',
+        overall_risk_score: countyRec.svi_overall,
+        overall_risk_category: countyRec.sdoh_band || countyRec.overall_risk_category,
+        scores: countyRec.scores
+      },
+      ml_prediction: {
+        risk_scores: dynamicRisks.risk_scores,
+        risk_levels: dynamicRisks.risk_levels,
+        sdoh_barriers: countyRec.sdoh_barriers,
+        health_score: dynamicRisks.healthScore
       },
       saved_at: new Date().toISOString()
     },
@@ -1313,28 +1317,20 @@ const handleAnalyze = async () => {
       setMlPredictionResults(data)
     } catch (err) {
       console.error('❌ Failed fetching ML prediction:', err)
-      // Save a fallback simulated prediction so the UI can still show patient-specific insights
+      // Look up genuine county dataset metrics
+      const countyRec = findCountyRecord(primaryLoc.county, primaryLoc.state)
+      const dynamicRisks = calculateDynamicRisks(form.value, countyRec)
+
+      // Save a simulated prediction strictly calculated from patient vitals and location SDOH dataset
       setMlPredictionResults({
-        risk_scores: {
-          diabetes: form.value.diabetes === 'Yes' ? 0.85 : 0.25,
-          hypertension: form.value.hypertension === 'Yes' ? 0.78 : 0.32,
-          heart_disease: form.value.heart_disease === 'Yes' ? 0.70 : 0.15,
-          asthma: form.value.asthma === 'Yes' ? 0.65 : 0.10
-        },
-        risk_levels: {
-          diabetes: form.value.diabetes === 'Yes' ? 'High' : 'Low',
-          hypertension: form.value.hypertension === 'Yes' ? 'High' : 'Low',
-          heart_disease: form.value.heart_disease === 'Yes' ? 'High' : 'Low',
-          asthma: form.value.asthma === 'Yes' ? 'High' : 'Low'
-        },
-        sdoh_barriers: [
-          'High economic stability concerns',
-          'Limited access to primary care providers',
-          'Transportation accessibility limits'
-        ],
-        kb_insights: 'Patient clinical risk factors indicate elevated risk. Monitor medication adherence (currently ' + form.value.medication_adherence + '%).',
+        risk_scores: dynamicRisks.risk_scores,
+        risk_levels: dynamicRisks.risk_levels,
+        sdoh_barriers: countyRec.sdoh_barriers,
+        overall_composite_risk_score: countyRec.svi_overall,
+        health_score: dynamicRisks.healthScore,
+        kb_insights: `Patient clinical evaluation in ${countyRec.county_name}, ${countyRec.state_abbr}. Area SVI: ${countyRec.svi_overall} (${countyRec.sdoh_band} vulnerability). Poverty rate: ${countyRec.poverty_rate}%, Food insecurity: ${countyRec.food_insecurity}%.`,
         disease_pathways: {
-          pathway: 'Clinical assessment suggests screening every 3 months. Lifestyle modifications recommended.'
+          pathway: `Clinical assessment for ${countyRec.county_name} suggests monitoring diabetes (${countyRec.diabetes_prevalence}% county prevalence) and hypertension (${countyRec.high_bp_prevalence}% county prevalence).`
         }
       })
     }
@@ -1413,25 +1409,16 @@ const handleAnalyze = async () => {
       setPredictionModelResults(data)
     } catch (err) {
       console.error('❌ Failed fetching Prediction Model data:', err)
-      const locCounty = primaryLoc.county || form.value.county || 'Cuyahoga County'
-      const locState = primaryLoc.state || form.value.state || 'Ohio'
-      const cleanCity = locCounty.replace(/\s+County$/i, '').trim() || locCounty
-      // Fallback simulated prediction model scores using actual patient location
+      const countyRec = findCountyRecord(primaryLoc.county, primaryLoc.state)
+      // Fallback simulated prediction model scores using actual location SDOH dataset
       setPredictionModelResults({
         zipcode: form.value.zipcode || '44102',
-        city: cleanCity,
-        county: locCounty,
-        state: locState,
-        overall_risk_score: 0.625,
-        overall_risk_category: 'Medium',
-        scores: {
-          economic_stability: 0.58,
-          healthcare_access: 0.64,
-          education_access: 0.70,
-          neighborhood_environment: 0.55,
-          food_security: 0.60,
-          social_context: 0.68
-        }
+        city: countyRec.county_name,
+        county: countyRec.county_name,
+        state: countyRec.state_name || primaryLoc.state || 'Ohio',
+        overall_risk_score: countyRec.svi_overall,
+        overall_risk_category: countyRec.sdoh_band || countyRec.overall_risk_category,
+        scores: countyRec.scores
       })
     }
   })()

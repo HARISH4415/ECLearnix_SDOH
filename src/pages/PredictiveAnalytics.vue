@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 const microscopeSrc = ref(`/assets/magnifying-glass-fingerprint.gif?t=${Date.now()}`)
 import IconBase from '../components/dashboard/IconBase.vue'
 import { patientData, locationRecords, mlPredictionResults, predictionModelResults, isAnalyzed } from '../store/appState'
+import { findCountyRecord, calculateDynamicRisks } from '../data/countySdohDataset.js'
 
 const selectedLocationIdx = ref(0)
 
@@ -33,17 +34,55 @@ const hasActivePatient = computed(() => {
   return isAnalyzed.value || (patientData.value && Boolean(patientData.value.name && patientData.value.name.trim()))
 })
 
-const patientSidebarData = computed(() => {
-  const mlRes = mlPredictionResults.value
-  const risk = mlRes?.risk_scores || { diabetes: 0.25, hypertension: 0.32, heart_disease: 0.15, asthma: 0.10 }
-  const avgRisk = Object.values(risk).reduce((a, b) => a + b, 0) / Object.values(risk).length
-  const compositeRisk = (mlRes && typeof mlRes.overall_composite_risk_score === 'number') 
-    ? mlRes.overall_composite_risk_score 
-    : (avgRisk > 0 ? avgRisk : 0.20)
+const activeLocationInfo = computed(() => {
+  const p = predictionModelResults.value
+  const pat = patientData.value
+
+  // Prioritize active patient/user location from availableLocations or patientData
+  let activeLoc = null
+  if (availableLocations.value.length > 0) {
+    activeLoc = availableLocations.value[selectedLocationIdx.value] || availableLocations.value[0]
+  }
+
+  const rawCounty = activeLoc?.county || pat?.county || p?.county || ''
+  const rawState = activeLoc?.state || pat?.state || p?.state || ''
+
+  // Look up genuine county dataset metrics
+  const record = findCountyRecord(rawCounty, rawState)
+  const displayLocation = record.state_name 
+    ? `${record.county_name}, ${record.state_name}` 
+    : record.display_label
 
   return {
-    equityScore: Math.round((1 - compositeRisk) * 100),
-    equityLevel: compositeRisk >= 0.65 ? 'High Risk' : (compositeRisk >= 0.35 ? 'Moderate' : 'Low Risk'),
+    city: record.county_name,
+    state: record.state_name || record.state_abbr,
+    displayLocation,
+    overall_risk_score: record.svi_overall,
+    overall_risk_category: record.sdoh_band || record.overall_risk_category,
+    scores: record.scores,
+    record
+  }
+})
+
+// Dynamic clinical risk probabilities strictly linked to active location + patient vitals
+const activeLocationRisks = computed(() => {
+  const county = activeLocationInfo.value.record
+  return calculateDynamicRisks(patientData.value || {}, county)
+})
+
+const patientSidebarData = computed(() => {
+  const mlRes = mlPredictionResults.value
+  if (mlRes && typeof mlRes.overall_composite_risk_score === 'number' && mlRes.overall_composite_risk_score > 0) {
+    const compositeRisk = mlRes.overall_composite_risk_score
+    return {
+      equityScore: Math.round((1 - compositeRisk) * 100),
+      equityLevel: compositeRisk >= 0.65 ? 'High Risk' : (compositeRisk >= 0.35 ? 'Moderate' : 'Low Risk'),
+    }
+  }
+  const score = activeLocationRisks.value.healthScore
+  return {
+    equityScore: score,
+    equityLevel: score >= 75 ? 'Low Risk' : (score >= 50 ? 'Moderate' : 'High Risk'),
   }
 })
 
@@ -62,62 +101,6 @@ const patientBmi = computed(() => {
     bmi: '22.8',
     h: 165,
     w: 62
-  }
-})
-
-const activeLocationInfo = computed(() => {
-  const p = predictionModelResults.value
-  const pat = patientData.value
-
-  // Prioritize active patient/user location from availableLocations or patientData
-  let activeLoc = null
-  if (availableLocations.value.length > 0) {
-    activeLoc = availableLocations.value[selectedLocationIdx.value] || availableLocations.value[0]
-  }
-
-  const rawCounty = activeLoc?.county || pat?.county || p?.county || ''
-  const rawState = activeLoc?.state || pat?.state || p?.state || ''
-
-  let city = ''
-  let state = rawState || 'Ohio'
-
-  if (rawCounty) {
-    if (rawCounty.includes(',')) {
-      const parts = rawCounty.split(',').map(s => s.trim())
-      city = parts[0]
-      if (parts[1] && (!rawState || rawState === 'Ohio')) state = parts[1]
-    } else {
-      city = rawCounty
-    }
-  } else if (p?.city && p.city !== 'Cleveland') {
-    city = p.city
-  } else {
-    city = pat?.name ? 'Local Community' : 'Cleveland, Ohio'
-  }
-
-  // Format clean display location: e.g. "Camden County, North Carolina" or "Cleveland, Ohio"
-  let displayLocation = city
-  if (state && !city.toLowerCase().includes(state.toLowerCase())) {
-    displayLocation = `${city}, ${state}`
-  }
-
-  const riskScore = typeof p?.overall_risk_score === 'number' ? p.overall_risk_score : 0.63
-  const riskCategory = p?.overall_risk_category || 'Medium'
-  const scores = {
-    healthcare_access: p?.scores?.healthcare_access ?? 0.64,
-    social_context: p?.scores?.social_context ?? 0.68,
-    food_security: p?.scores?.food_security ?? 0.60,
-    neighborhood_environment: p?.scores?.neighborhood_environment ?? 0.55,
-    economic_stability: p?.scores?.economic_stability ?? 0.58,
-    education_access: p?.scores?.education_access ?? 0.70
-  }
-  return {
-    city,
-    state,
-    displayLocation,
-    overall_risk_score: riskScore,
-    overall_risk_category: riskCategory,
-    scores
   }
 })
 
@@ -153,13 +136,8 @@ const diseaseMeta = {
 }
 
 const diseaseList = computed(() => {
-  const defaultScores = {
-    diabetes: 0.25,
-    hypertension: 0.32,
-    heart_disease: 0.15,
-    asthma: 0.10
-  }
-  const scores = mlPredictionResults.value?.risk_scores || defaultScores
+  // Use place-specific dynamic risk calculations from county dataset + patient vitals
+  const scores = activeLocationRisks.value.risk_scores
   return Object.entries(scores).map(([key, val]) => {
     const meta = diseaseMeta[key] || { name: key.replace('_', ' '), iconColor: '#64748b', bgColor: '#f1f5f9', barColor: '#64748b', iconSvg: `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><path d="M12 8v8M8 12h8"/></svg>` }
     return {
